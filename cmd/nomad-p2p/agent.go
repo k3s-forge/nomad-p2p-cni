@@ -67,7 +67,6 @@ func newSeedRegistry() *seedRegistry {
 func (s *seedRegistry) register(node *NodeRegistration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	node.Subnet = node.Subnet // keep existing
 	s.table[node.OverlayIP] = node
 }
 

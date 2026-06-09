@@ -10,21 +10,19 @@ import (
 	"unsafe"
 )
 
-// ConsulService represents a Consul service instance
 type ConsulService struct {
-	ID      string   `json:"ID"`
-	Service string   `json:"Service"`
-	Address string   `json:"Address"`
-	Port    int      `json:"Port"`
-	Tags    []string `json:"Tags"`
+	ID      string            `json:"ID"`
+	Service string            `json:"Service"`
+	Address string            `json:"Address"`
+	Port    int               `json:"Port"`
+	Tags    []string          `json:"Tags"`
 	Meta    map[string]string `json:"Meta"`
 }
 
-// consulClient wraps HTTP calls to Consul API
 type consulClient struct {
-	addr    string
-	token   string
-	client  *http.Client
+	addr   string
+	token  string
+	client *http.Client
 }
 
 func newConsulClient(addr, token string) *consulClient {
@@ -37,7 +35,6 @@ func newConsulClient(addr, token string) *consulClient {
 	}
 }
 
-// queryService returns all instances of a service
 func (c *consulClient) queryService(service string) ([]ConsulService, error) {
 	url := fmt.Sprintf("http://%s/v1/health/service/%s?passing=true", c.addr, service)
 	req, err := http.NewRequest("GET", url, nil)
@@ -72,9 +69,7 @@ func (c *consulClient) queryService(service string) ([]ConsulService, error) {
 	return services, nil
 }
 
-// queryVIPBackends returns all healthy backend IPs for a VIP from Consul
 func (c *consulClient) queryVIPBackends(vip string) ([]net.IP, error) {
-	// List all services
 	url := fmt.Sprintf("http://%s/v1/catalog/services", c.addr)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -90,12 +85,11 @@ func (c *consulClient) queryVIPBackends(vip string) ([]net.IP, error) {
 	}
 	defer resp.Body.Close()
 
-	var serviceNames map[string]map[string]interface{}
+	var serviceNames map[string][]string
 	if err := json.NewDecoder(resp.Body).Decode(&serviceNames); err != nil {
 		return nil, err
 	}
 
-	// For each service, query healthy instances and collect backends matching the VIP
 	var allBackends []net.IP
 	for name := range serviceNames {
 		instances, err := c.queryService(name)
@@ -118,10 +112,8 @@ func (c *consulClient) queryVIPBackends(vip string) ([]net.IP, error) {
 	return allBackends, nil
 }
 
-// watchVIPsFromConsul polls Consul and updates BPF VIP_MAP
 func (a *Agent) watchVIPsFromConsul() {
 	if a.cfg.ConsulAddr == "" {
-		// No Consul configured, use config-only mode
 		return
 	}
 
@@ -153,15 +145,12 @@ func (a *Agent) updateVIPsFromConsul(client *consulClient) {
 		}
 		vipU := *(*uint32)(unsafe.Pointer(&vip[0]))
 
-		// Start with static backends from config
 		backends := a.getStaticVIPBackends(vipStr)
 
-		// Merge in Consul-discovered backends
 		consulBackends, err := client.queryVIPBackends(vipStr)
 		if err != nil {
 			log.Printf("[agent] VIP query failed for %s: %v", vipStr, err)
 		} else {
-			// Deduplicate
 			existing := make(map[string]bool)
 			for _, ip := range backends {
 				existing[ip.String()] = true

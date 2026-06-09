@@ -48,7 +48,7 @@ func (c *stunClient) query(addr string) (*stunResult, error) {
 	}
 
 	req := make([]byte, 20)
-	binary.BigEndian.PutUint16(req[0:2], 0x0001) // Binding Request
+	binary.BigEndian.PutUint16(req[0:2], 0x0001)
 	binary.BigEndian.PutUint32(req[4:8], stunMagicCookie)
 	copy(req[8:20], txID)
 
@@ -83,7 +83,7 @@ func parseSTUNResp(data []byte, txID []byte) (*stunResult, error) {
 		attrType := binary.BigEndian.Uint16(data[off : off+2])
 		attrLen := int(binary.BigEndian.Uint16(data[off+2 : off+4]))
 		if attrType == 0x0001 || attrType == 0x0020 {
-			return parseXORAddr(data[off+4:off+4+attrLen], attrType, data[4:20])
+			return parseXORAddr(data[off+4:off+4+attrLen], attrType)
 		}
 		off += 4 + attrLen
 		if attrLen%4 != 0 {
@@ -93,7 +93,7 @@ func parseSTUNResp(data []byte, txID []byte) (*stunResult, error) {
 	return nil, fmt.Errorf("no mapped address")
 }
 
-func parseXORAddr(data []byte, attrType uint16, msgID []byte) (*stunResult, error) {
+func parseXORAddr(data []byte, attrType uint16) (*stunResult, error) {
 	if len(data) < 8 {
 		return nil, fmt.Errorf("attr too short")
 	}
@@ -109,4 +109,56 @@ func parseXORAddr(data []byte, attrType uint16, msgID []byte) (*stunResult, erro
 		port ^= int((stunMagicCookie >> 16) & 0xFFFF)
 	}
 	return &stunResult{PublicIP: ip, PublicPort: port}, nil
+}
+
+func (a *Agent) discoverPublicIP() error {
+	c := &stunClient{servers: a.cfg.StunServers, timeout: 3 * time.Second}
+	r, err := c.discover()
+	if err != nil {
+		return err
+	}
+	a.publicIP = r.PublicIP
+	a.publicPort = r.PublicPort
+	return nil
+}
+
+func (a *Agent) stunRefreshLoop() {
+	interval := time.Duration(a.cfg.StunRefreshInterval) * time.Second
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-a.stopCh:
+			return
+		case <-ticker.C:
+			oldIP := a.publicIP.String()
+			oldPort := a.publicPort
+			if err := a.discoverPublicIP(); err != nil {
+				log.Printf("[agent] STUN refresh failed: %v", err)
+				continue
+			}
+			a.metrics.inc("stun_refreshes")
+			if a.publicIP.String() != oldIP || a.publicPort != oldPort {
+				log.Printf("[agent] public IP changed: %s:%d -> %s:%d",
+					oldIP, oldPort, a.publicIP, a.publicPort)
+				a.reRegisterWithSeeds()
+			}
+		}
+	}
+}
+
+func (a *Agent) reRegisterWithSeeds() {
+	reg := NodeRegistration{
+		OverlayIP:    a.cfg.NodeOverlayIP,
+		PublicIP:     a.publicIP.String(),
+		PublicPort:   a.publicPort,
+		Subnet:       a.cfg.NodeSubnet,
+		RelayCapable: a.seedMode,
+	}
+	a.mu.RLock()
+	for addr, conn := range a.seedConns {
+		a.sendToSeed(conn, Message{Type: "register", NodeInfo: &reg})
+		log.Printf("[agent] re-registered with seed %s", addr)
+	}
+	a.mu.RUnlock()
 }

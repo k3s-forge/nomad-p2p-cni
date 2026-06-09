@@ -8,66 +8,56 @@ import (
 )
 
 type Config struct {
-	// Node identity
-	NodeOverlayIP string `json:"node_overlay_ip"` // e.g. "10.244.0.1"
-	NodeSubnet    string `json:"node_subnet"`      // e.g. "10.244.1.0/24"
+	NodeOverlayIP string `json:"node_overlay_ip"`
+	NodeSubnet    string `json:"node_subnet"`
 
-	// Seed nodes for bootstrap
 	Seeds []SeedConfig `json:"seeds"`
 
-	// Tunnel settings
 	TunnelVNI    int    `json:"tunnel_vni"`
-	TunnelDevice string `json:"tunnel_device"` // e.g. "gnv0"
+	TunnelDevice string `json:"tunnel_device"`
 
-	// Authentication
-	PSK string `json:"psk"` // Pre-shared key for HMAC
+	PSK string `json:"psk"`
 
-	// NAT traversal
-	StunServers []string `json:"stun_servers"`
-	ListenPort  int      `json:"listen_port"` // UDP listen port for P2P
+	StunServers         []string `json:"stun_servers"`
+	ListenPort          int      `json:"listen_port"`
+	StunRefreshInterval int      `json:"stun_refresh_interval"`
 
-	// STUN refresh interval (seconds, default 120)
-	StunRefreshInterval int `json:"stun_refresh_interval"`
+	IPsecEnabled bool   `json:"ipsec_enabled"`
+	IPsecSPI     uint32 `json:"ipsec_spi"`
+	IPsecKey     string `json:"ipsec_key"`
 
-	// IPsec (optional)
-	IPsecEnabled  bool   `json:"ipsec_enabled"`
-	IPsecSPI      uint32 `json:"ipsec_spi"`
-	IPsecKey      string `json:"ipsec_key"` // hex-encoded AES key
-
-	// CNI settings
 	CNIBinPath string `json:"cni_bin_path"`
 	MTU        int    `json:"mtu"`
 
-	// VIP settings
-	VIPEnabled   bool           `json:"vip_enabled"`
-	VIPWatchList []string       `json:"vip_watch_list"` // VIPs to watch
-	VIPBackends  []VIPBackend   `json:"vip_backends"`   // Static VIP->backend mappings (no Consul needed)
+	VIPEnabled   bool         `json:"vip_enabled"`
+	VIPWatchList []string     `json:"vip_watch_list"`
+	VIPBackends  []VIPBackend `json:"vip_backends"`
 
-	// Consul integration
-	ConsulAddr  string `json:"consul_addr"`  // Consul HTTP address (e.g. "127.0.0.1:8500")
-	ConsulToken string `json:"consul_token"` // Consul ACL token (optional)
+	ConsulAddr  string `json:"consul_addr"`
+	ConsulToken string `json:"consul_token"`
 
-	// Firewall ACL settings
-	FirewallEnabled bool          `json:"firewall_enabled"`
-	DefaultPolicy   string        `json:"default_policy"` // "allow" or "deny"
-	AllowedSources  []string      `json:"allowed_sources"` // IPs allowed to reach this node
-	AllowedPorts    []PortRule    `json:"allowed_ports"`   // port-level rules
+	FirewallEnabled bool       `json:"firewall_enabled"`
+	DefaultPolicy   string     `json:"default_policy"`
+	AllowedSources  []string   `json:"allowed_sources"`
+	AllowedPorts    []PortRule `json:"allowed_ports"`
+
+	MetricsPort int `json:"metrics_port"`
 }
 
 type SeedConfig struct {
-	Addr string `json:"addr"` // IP:port or hostname
+	Addr string `json:"addr"`
 }
 
 type PortRule struct {
-	SourceIP string `json:"source_ip"` // source IP
-	Port     int    `json:"port"`      // destination port
-	Protocol string `json:"protocol"`  // "tcp" or "udp"
-	Allow    bool   `json:"allow"`     // true=allow, false=deny
+	SourceIP string `json:"source_ip"`
+	Port     int    `json:"port"`
+	Protocol string `json:"protocol"`
+	Allow    bool   `json:"allow"`
 }
 
 type VIPBackend struct {
-	VIP     string   `json:"vip"`     // VIP address (e.g. "10.100.0.50")
-	Backends []string `json:"backends"` // Backend IP addresses
+	VIP      string   `json:"vip"`
+	Backends []string `json:"backends"`
 }
 
 func Load(path string) (*Config, error) {
@@ -118,6 +108,9 @@ func (c *Config) Validate() error {
 	}
 	if c.DefaultPolicy == "" {
 		c.DefaultPolicy = "allow"
+	}
+	if c.MetricsPort == 0 {
+		c.MetricsPort = 9090
 	}
 	return nil
 }

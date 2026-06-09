@@ -32,5 +32,6 @@
   "firewall_enabled": false,
   "default_policy": "allow",
   "allowed_sources": [],
-  "allowed_ports": []
+  "allowed_ports": [],
+  "metrics_port": 9090
 }

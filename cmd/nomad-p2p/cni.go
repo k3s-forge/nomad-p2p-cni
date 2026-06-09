@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"unsafe"
 
@@ -26,7 +27,10 @@ type NetConf struct {
 	MTU        int    `json:"mtu"`
 }
 
-const bpfMapPath = "/sys/fs/bpf/nomad-p2p"
+const (
+	bpfMapPath = "/sys/fs/bpf/nomad-p2p"
+	stateDir   = "/var/run/nomad-p2p"
+)
 
 func shortID(id string) string {
 	if len(id) > 12 {
@@ -65,25 +69,22 @@ func cniAddSk(args *skel.CmdArgs) error {
 			return fmt.Errorf("configure container: %w", err)
 		}
 
-		// Find the veth peer ifindex on the host side
 		peerIfIndex, err := findVethPeerIndex(args.Netns)
 		if err != nil {
 			log.Printf("[cni] find veth peer: %v (non-fatal)", err)
 		} else {
-			// Register route with actual peer ifindex
 			if err := registerRouteWithIfindex(podIP, peerIfIndex); err != nil {
 				log.Printf("[cni] BPF route register: %v (non-fatal)", err)
 			}
-
-			// Attach TC egress program to the veth peer
 			if err := attachTCToVethPeer(peerIfIndex); err != nil {
-				log.Printf("[cni] TC attach to veth peer: %v (non-fatal)", err)
+				log.Printf("[cni] TC attach: %v (non-fatal)", err)
 			} else {
 				log.Printf("[cni] TC egress attached to veth peer %d", peerIfIndex)
 			}
 		}
 	}
 
+	saveContainerState(args.ContainerID, podIP)
 	log.Printf("[cni] ADD %s -> %s", shortID(args.ContainerID), podIP)
 
 	result := &current.Result{
@@ -100,14 +101,12 @@ func cniAddSk(args *skel.CmdArgs) error {
 
 func cniDelSk(args *skel.CmdArgs) error {
 	log.Printf("[cni] DEL %s", shortID(args.ContainerID))
-
-	// Try to remove TC filter from any veth we can find
+	unregisterRouteByContainerID(args.ContainerID)
 	cleanupTCFilters()
-
 	if args.Netns != "" {
-		cmd := exec.Command("ip", "netns", "del", args.Netns)
-		_ = cmd.Run()
+		exec.Command("ip", "netns", "del", args.Netns).Run()
 	}
+	removeContainerState(args.ContainerID)
 	return nil
 }
 
@@ -127,7 +126,6 @@ func cniAddFromArgs(containerID, netns string, stdinData []byte) error {
 		if err := configureContainer(netns, podIP, gateway, conf.MTU); err != nil {
 			return err
 		}
-
 		peerIfIndex, err := findVethPeerIndex(netns)
 		if err != nil {
 			log.Printf("[cni] find veth peer: %v (non-fatal)", err)
@@ -143,6 +141,7 @@ func cniAddFromArgs(containerID, netns string, stdinData []byte) error {
 		}
 	}
 
+	saveContainerState(containerID, podIP)
 	log.Printf("[cni] ADD %s -> %s", shortID(containerID), podIP)
 	result := &current.Result{
 		CNIVersion: conf.CniVersion,
@@ -158,11 +157,12 @@ func cniAddFromArgs(containerID, netns string, stdinData []byte) error {
 
 func cniDelFromArgs(containerID, netns string, stdinData []byte) error {
 	log.Printf("[cni] DEL %s", shortID(containerID))
+	unregisterRouteByContainerID(containerID)
 	cleanupTCFilters()
 	if netns != "" {
-		cmd := exec.Command("ip", "netns", "del", netns)
-		_ = cmd.Run()
+		exec.Command("ip", "netns", "del", netns).Run()
 	}
+	removeContainerState(containerID)
 	return nil
 }
 
@@ -207,18 +207,13 @@ func configureContainer(netns string, podIP net.IP, gateway net.IP, mtu int) err
 	return nil
 }
 
-// --- Veth peer discovery ---
-
-// findVethPeerIndex finds the host-side veth peer index for a container
 func findVethPeerIndex(netns string) (uint32, error) {
-	// Find the ifindex of eth0 inside the container
 	ns := "--net=/var/run/netns/" + netns
 	out, err := exec.Command("nsenter", ns, "--", "ip", "link", "show", "eth0").CombinedOutput()
 	if err != nil {
 		return 0, fmt.Errorf("show eth0 in ns: %w: %s", err, out)
 	}
 
-	// Parse: "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1420 ... link/ether ... brd ..."
 	lines := strings.Split(string(out), "\n")
 	if len(lines) == 0 {
 		return 0, fmt.Errorf("no output from ip link show eth0")
@@ -230,13 +225,10 @@ func findVethPeerIndex(netns string) (uint32, error) {
 		return 0, fmt.Errorf("could not parse ifindex from: %s", lines[0])
 	}
 
-	// Find the veth peer on the host by looking for the peer link
-	// Use ethtool or check /sys/class/net/*/iflink
 	out, err = exec.Command("bash", "-c",
 		fmt.Sprintf("for f in /sys/class/net/veth*/iflink; do [ -f \"$f\" ] && peer=$(cat \"$f\") && [ \"$peer\" = \"%d\" ] && basename $(dirname $(dirname $f)); done",
 			containerIfIndex)).CombinedOutput()
 	if err == nil && len(strings.TrimSpace(string(out))) > 0 {
-		// Found the veth on host, get its ifindex
 		vethName := strings.TrimSpace(string(out))
 		out2, err := exec.Command("ip", "link", "show", vethName).CombinedOutput()
 		if err == nil {
@@ -248,7 +240,6 @@ func findVethPeerIndex(netns string) (uint32, error) {
 		}
 	}
 
-	// Fallback: find via /sys/class/net
 	out, err = exec.Command("bash", "-c",
 		fmt.Sprintf("for d in /sys/class/net/veth*; do iflink=$(cat $d/iflink 2>/dev/null); [ \"$iflink\" = \"%d\" ] && basename $d && break; done",
 			containerIfIndex)).CombinedOutput()
@@ -264,8 +255,6 @@ func findVethPeerIndex(netns string) (uint32, error) {
 
 	return 0, fmt.Errorf("veth peer not found for container ifindex %d", containerIfIndex)
 }
-
-// --- BPF Map integration ---
 
 func registerRouteWithIfindex(podIP net.IP, ifindex uint32) error {
 	mapPath := bpfMapPath + "/container_route"
@@ -288,10 +277,33 @@ func registerRouteWithIfindex(podIP net.IP, ifindex uint32) error {
 	return nil
 }
 
-// --- TC program attachment to veth peers ---
+func unregisterRouteByContainerID(containerID string) {
+	ip := loadContainerState(containerID)
+	if ip == nil {
+		return
+	}
+
+	mapPath := bpfMapPath + "/container_route"
+	m, err := ebpf.LoadPinnedMap(mapPath, nil)
+	if err != nil {
+		log.Printf("[cni] load pinned map for delete: %v", err)
+		return
+	}
+	defer m.Close()
+
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return
+	}
+	key := *(*uint32)(unsafe.Pointer(&ip4[0]))
+	if err := m.Delete(key); err != nil {
+		log.Printf("[cni] delete route from BPF map: %v", err)
+	} else {
+		log.Printf("[cni] unregistered route %s", ip)
+	}
+}
 
 func attachTCToVethPeer(ifindex uint32) error {
-	// Find interface name from ifindex
 	out, err := exec.Command("bash", "-c",
 		fmt.Sprintf("for d in /sys/class/net/*; do cat $d/ifindex 2>/dev/null | grep -q %d && basename $d && break; done", ifindex)).CombinedOutput()
 	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
@@ -299,19 +311,13 @@ func attachTCToVethPeer(ifindex uint32) error {
 	}
 	ifName := strings.TrimSpace(string(out))
 
-	// Ensure clsact qdisc
 	exec.Command("tc", "qdisc", "add", "dev", ifName, "clsact").Run()
 
-	// Use the pinned BPF program
 	progPath := bpfMapPath + "/mesh_prog"
-
-	// Try to find the pinned program
 	if _, err := os.Stat(progPath); os.IsNotExist(err) {
-		// No pinned program available, skip TC attach
 		return fmt.Errorf("BPF program not pinned at %s", progPath)
 	}
 
-	// Attach TC filter
 	cmd := exec.Command("tc", "filter", "add", "dev", ifName, "egress",
 		"pref", "1", "handle", "1", "bpf", "direct-action", "pinned", progPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -323,7 +329,6 @@ func attachTCToVethPeer(ifindex uint32) error {
 }
 
 func cleanupTCFilters() {
-	// Best effort cleanup of TC filters on all veth interfaces
 	out, _ := exec.Command("bash", "-c", "ip link show type veth 2>/dev/null | grep -o 'veth[^:]*'").CombinedOutput()
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		ifName := strings.TrimSpace(line)
@@ -332,6 +337,26 @@ func cleanupTCFilters() {
 		}
 		exec.Command("tc", "filter", "del", "dev", ifName, "egress", "pref", "1").Run()
 	}
+}
+
+func saveContainerState(containerID string, ip net.IP) {
+	os.MkdirAll(stateDir, 0755)
+	path := filepath.Join(stateDir, containerID)
+	os.WriteFile(path, []byte(ip.String()), 0644)
+}
+
+func loadContainerState(containerID string) net.IP {
+	path := filepath.Join(stateDir, containerID)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	return net.ParseIP(strings.TrimSpace(string(data)))
+}
+
+func removeContainerState(containerID string) {
+	path := filepath.Join(stateDir, containerID)
+	os.Remove(path)
 }
 
 func pluginMain() {

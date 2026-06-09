@@ -83,11 +83,62 @@ jobs:
         if: always()
         run: docker logs test-node 2>&1 | tail -100
 
+      - name: Multi-node test
+        run: |
+          NETWORK="nomad-p2p-net"
+          docker network create $NETWORK 2>/dev/null || true
+
+          # Seed node
+          docker run -d --name seed-node \
+            --network $NETWORK \
+            --privileged --cap-add=SYS_ADMIN --cap-add=NET_ADMIN \
+            --cgroupns=host -v /sys/fs/bpf:/sys/fs/bpf \
+            nomad-p2p-test seed
+          sleep 3
+          SEED_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' seed-node)
+          echo "Seed IP: $SEED_IP"
+
+          # Node 1
+          docker run -d --name node-1 \
+            --network $NETWORK \
+            --privileged --cap-add=SYS_ADMIN --cap-add=NET_ADMIN \
+            --cgroupns=host -v /sys/fs/bpf:/sys/fs/bpf \
+            -e SEED_ADDR="${SEED_IP}:9527" \
+            -e NODE_OVERLAY_IP="10.244.0.2" \
+            nomad-p2p-test agent
+          sleep 3
+
+          # Node 2
+          docker run -d --name node-2 \
+            --network $NETWORK \
+            --privileged --cap-add=SYS_ADMIN --cap-add=NET_ADMIN \
+            --cgroupns=host -v /sys/fs/bpf:/sys/fs/bpf \
+            -e SEED_ADDR="${SEED_IP}:9527" \
+            -e NODE_OVERLAY_IP="10.244.0.3" \
+            nomad-p2p-test agent
+          sleep 3
+
+          # Verify all nodes running
+          docker exec seed-node pgrep -f "nomad-p2p" && echo "Seed OK"
+          docker exec node-1 pgrep -f "nomad-p2p" && echo "Node1 OK"
+          docker exec node-2 pgrep -f "nomad-p2p" && echo "Node2 OK"
+          docker exec seed-node ss -ulnp | grep 9527 && echo "Seed UDP OK"
+          docker exec node-1 ss -ulnp | grep 9527 && echo "Node1 UDP OK"
+
+          # Check discovery
+          docker logs seed-node 2>&1 | tail -10
+          docker logs node-1 2>&1 | tail -10
+
+          docker rm -f seed-node node-1 node-2 2>/dev/null || true
+          docker network rm $NETWORK 2>/dev/null || true
+
       - name: Cleanup
         if: always()
         run: |
           docker stop test-node 2>/dev/null || true
           docker rm test-node 2>/dev/null || true
+          docker rm -f seed-node node-1 node-2 2>/dev/null || true
+          docker network rm nomad-p2p-net 2>/dev/null || true
 
   release:
     needs: build

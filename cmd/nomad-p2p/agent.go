@@ -237,7 +237,14 @@ func (a *Agent) loadBPF() error {
 	if a.maps.NodeDynamicMap != nil {
 		a.maps.NodeDynamicMap.Pin(pinDir + "/node_dynamic")
 	}
-	log.Printf("[agent] mesh BPF maps loaded and pinned to %s", pinDir)
+
+	// Pin the TC egress program for CNI to attach to veth peers
+	if prog, ok := a.meshColl.Programs["egress_p2p_mesh"]; ok {
+		prog.Pin(pinDir + "/mesh_prog")
+		log.Printf("[agent] pinned egress_p2p_mesh program")
+	}
+
+	log.Printf("[agent] mesh BPF maps and programs pinned to %s", pinDir)
 
 	// Load VIP balancer if enabled
 	if a.cfg.VIPEnabled {

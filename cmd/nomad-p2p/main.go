@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/nomad-p2p-cni/config"
 )
 
 func main() {

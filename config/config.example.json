@@ -1,0 +1,23 @@
+{
+  "node_overlay_ip": "10.244.0.1",
+  "node_subnet": "10.244.1.0/24",
+  "seeds": [
+    {"addr": "seed1.example.com:9528"},
+    {"addr": "seed2.example.com:9528"}
+  ],
+  "tunnel_vni": 100,
+  "tunnel_device": "gnv0",
+  "psk": "your-pre-shared-key-here-change-me",
+  "stun_servers": [
+    "stun.l.google.com:19302",
+    "stun1.l.google.com:19302"
+  ],
+  "listen_port": 9527,
+  "ipsec_enabled": false,
+  "ipsec_spi": 0x1000,
+  "ipsec_key": "0123456789abcdef0123456789abcdef",
+  "cni_bin_path": "/opt/cni/bin/nomad-p2p-cni",
+  "mtu": 1420,
+  "vip_enabled": false,
+  "vip_watch_list": []
+}

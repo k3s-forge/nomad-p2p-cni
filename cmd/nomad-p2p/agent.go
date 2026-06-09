@@ -15,6 +15,7 @@ import (
 	"unsafe"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
 
@@ -115,6 +116,9 @@ func (s *seedRegistry) cleanup() {
 type Agent struct {
 	cfg        *config.Config
 	maps       *BPFMaps
+	meshColl   *ebpf.Collection
+	vipColl    *ebpf.Collection
+	fwColl     *ebpf.Collection
 	conn       net.PacketConn
 	publicIP   net.IP
 	publicPort int
@@ -126,6 +130,7 @@ type Agent struct {
 	registry   *seedRegistry
 	ipSecMgr   *ipSecManager
 	geneveDev  string
+	bpfLinks   []link.Link
 }
 
 func newAgent(cfg *config.Config, seedMode bool) (*Agent, error) {
@@ -162,6 +167,10 @@ func (a *Agent) run() error {
 
 	if err := a.setupGeneveDevice(); err != nil {
 		return fmt.Errorf("setup geneve: %w", err)
+	}
+
+	if err := a.attachBPF(); err != nil {
+		log.Printf("[agent] BPF attach warning: %v", err)
 	}
 
 	a.bootstrapFromSeeds()
@@ -208,6 +217,7 @@ func (a *Agent) loadBPF() error {
 		NodeDynamicMap:    coll.Maps["NODE_DYNAMIC_MAP"],
 		RouteMissRingbuf:  coll.Maps["ROUTE_MISS_RINGBUF"],
 	}
+	a.meshColl = coll
 	log.Printf("[agent] mesh BPF maps loaded")
 
 	// Load VIP balancer if enabled
@@ -222,6 +232,7 @@ func (a *Agent) loadBPF() error {
 			} else {
 				a.maps.VIPMap = vipColl.Maps["VIP_MAP"]
 				a.maps.VIPStatsMap = vipColl.Maps["VIP_STATS_MAP"]
+				a.vipColl = vipColl
 				log.Printf("[agent] VIP balancer BPF loaded")
 			}
 		}
@@ -239,6 +250,7 @@ func (a *Agent) loadBPF() error {
 			a.maps.ACLMap = fwColl.Maps["ACL_MAP"]
 			a.maps.PortACLMap = fwColl.Maps["PORT_ACL_MAP"]
 			a.maps.DefaultPolicy = fwColl.Maps["DEFAULT_POLICY"]
+				a.fwColl = fwColl
 			// Set default policy to allow-all for overlay traffic
 			if a.maps.DefaultPolicy != nil {
 				key := uint32(0)
@@ -300,6 +312,126 @@ func (a *Agent) loadACLsFromConfig() {
 
 	log.Printf("[agent] loaded %d IP rules, %d port rules",
 		len(a.cfg.AllowedSources), len(a.cfg.AllowedPorts))
+}
+
+// --- BPF Program Attachment ---
+
+func (a *Agent) attachBPF() error {
+	// Find primary network interface
+	iface, err := net.InterfaceByName("eth0")
+	if err != nil {
+		iface, err = net.InterfaceByName("ens3")
+		if err != nil {
+			iface, err = net.InterfaceByName("wlan0")
+			if err != nil {
+				log.Printf("[agent] no network interface found for XDP/TC attachment")
+				return nil
+			}
+		}
+	}
+	ifIndex := uint32(iface.Index)
+	log.Printf("[agent] attaching BPF to interface %s (index %d)", iface.Name, iface.Index)
+
+	// Attach mesh XDP program
+	if a.meshColl != nil {
+		if xdpProg, ok := a.meshColl.Programs["xdp_pass"]; ok {
+			l, err := link.AttachXDP(iface, xdpProg, 0)
+			if err != nil {
+				log.Printf("[agent] XDP attach failed: %v", err)
+			} else {
+				a.bpfLinks = append(a.bpfLinks, l)
+				log.Printf("[agent] XDP attached to %s", iface.Name)
+			}
+		}
+
+		// Attach TC egress program via iproute2
+		if tcProg, ok := a.meshColl.Programs["egress_p2p_mesh"]; ok {
+			if err := a.attachTC(ifIndex, tcProg, "egress"); err != nil {
+				log.Printf("[agent] TC egress attach failed: %v", err)
+			} else {
+				log.Printf("[agent] TC egress attached to %s", iface.Name)
+			}
+		}
+	}
+
+	// Attach firewall TC ingress
+	if a.fwColl != nil {
+		if fwProg, ok := a.fwColl.Programs["tc_ingress_firewall"]; ok {
+			if err := a.attachTC(ifIndex, fwProg, "ingress"); err != nil {
+				log.Printf("[agent] TC ingress attach failed: %v", err)
+			} else {
+				log.Printf("[agent] TC ingress firewall attached to %s", iface.Name)
+			}
+		}
+	}
+
+	// Attach VIP cgroup program
+	if a.vipColl != nil {
+		if vipProg, ok := a.vipColl.Programs["vip_load_balance"]; ok {
+			if err := a.attachCgroup(vipProg); err != nil {
+				log.Printf("[agent] cgroup attach failed: %v", err)
+			} else {
+				log.Printf("[agent] VIP cgroup program attached")
+			}
+		}
+	}
+
+	return nil
+}
+
+func (a *Agent) attachTC(ifIndex uint32, prog *ebpf.Program, direction string) error {
+	// Ensure clsact qdisc exists on the interface
+	cmd := exec.Command("tc", "qdisc", "add", "dev", fmt.Sprintf("lo"),
+		"clsact")
+	cmd.Run() // ignore error if already exists
+
+	// Get the interface name from index
+	iface, err := net.InterfaceByIndex(int(ifIndex))
+	if err != nil {
+		return fmt.Errorf("get interface: %w", err)
+	}
+
+	// Add clsact qdisc
+	cmd = exec.Command("tc", "qdisc", "add", "dev", iface.Name, "clsact")
+	cmd.Run() // ignore "exists" error
+
+	// Pin the program to bpffs so tc can find it
+	pinPath := fmt.Sprintf("/sys/fs/bpf/tc/%s_%d", direction, ifIndex)
+	exec.Command("rm", "-f", pinPath).Run()
+	if err := exec.Command("bpftool", "prog", "pin", "id",
+		fmt.Sprintf("%d", prog.FD()), pinPath).Run(); err != nil {
+		return fmt.Errorf("pin prog: %w", err)
+	}
+
+	// Attach via tc
+	filter := "1"
+	if direction == "ingress" {
+		filter = "1"
+	}
+	cmd = exec.Command("tc", "filter", "add", "dev", iface.Name, direction,
+		"pref", "1", "handle", "1", "bpf", "direct-action", "pinned", pinPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tc filter add: %w: %s", err, out)
+	}
+
+	return nil
+}
+
+func (a *Agent) attachCgroup(prog *ebpf.Program) error {
+	// Find or create the cgroup v2 mount
+	cgroupPath := "/sys/fs/cgroup"
+
+	// Try to attach to root cgroup
+	l, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cgroupPath,
+		Program: prog,
+		Attach:  ebpf.AttachCGroupInet4Connect,
+	})
+	if err != nil {
+		return fmt.Errorf("attach cgroup: %w", err)
+	}
+	a.bpfLinks = append(a.bpfLinks, l)
+	return nil
 }
 
 // --- STUN ---
@@ -782,6 +914,11 @@ func (a *Agent) shutdown() {
 	// Cleanup IPsec
 	if a.ipSecMgr != nil {
 		a.ipSecMgr.delSA()
+	}
+
+	// Close BPF links
+	for _, l := range a.bpfLinks {
+		l.Close()
 	}
 }
 

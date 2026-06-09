@@ -15,6 +15,7 @@
 #define GENEVE_UDP_PORT 6081
 #define MAX_NODE_ENTRIES 4096
 #define ROUTE_MISS_EVENT 1
+#define BPF_F_TUNINFO_IPV4 0
 
 // Key: overlay destination IP (network byte order)
 // Value: local ifindex of the container veth (for local delivery)
@@ -104,10 +105,8 @@ int egress_p2p_mesh(struct __sk_buff *skb) {
 
         bpf_skb_set_tunnel_key(skb, &key, sizeof(key), 0);
 
-        // Redirect to geneve tunnel device (gnv0)
-        // The Geneve device will encapsulate and send to remote:6081
-        int ifindex = bpf_get_ifindex();
-        return bpf_redirect(ifindex, BPF_F_INGRESS);
+        // Redirect to the same interface (kernel routes via geneve tunnel)
+        return bpf_redirect(skb->ifindex, BPF_F_INGRESS);
     }
 
     // Route miss - emit to ringbuf for userspace resolution

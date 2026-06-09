@@ -1,13 +1,9 @@
 .PHONY: all build-bpf build-agent build-seed build-cni clean
 
 CLANG ?= clang
-LLC ?= llc
 
-BPFTOOL ?= bpftool
-
-# Detect libbpf headers location
-LIBBPF_HEADERS ?= $(shell dpkg -L libbpf-dev 2>/dev/null | grep include | head -1 || echo "/usr/include")
-BPF_CFLAGS := -O2 -g -Wall -target bpf -I$(LIBBPF_HEADERS)
+# BPF compile flags
+BPF_CFLAGS := -O2 -g -Wall -target bpf
 
 BIN_DIR := bin
 

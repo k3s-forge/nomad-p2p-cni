@@ -20,20 +20,21 @@ jobs:
       - name: Install BPF build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            clang \
-            llvm \
-            libbpf-dev \
-            linux-headers-generic \
-            libelf-dev \
-            zlib1g-dev
+          sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev
 
-      - name: Verify BPF headers
+      - name: Debug BPF environment
         run: |
-          echo "=== Checking BPF headers ==="
-          ls -la /usr/include/bpf/ 2>/dev/null || echo "No /usr/include/bpf/"
-          dpkg -L libbpf-dev 2>/dev/null | head -20 || echo "libbpf-dev not found"
-          find /usr/include -name "bpf_helpers.h" 2>/dev/null || echo "bpf_helpers.h not found"
+          echo "=== clang version ==="
+          clang --version
+          echo "=== BPF headers ==="
+          find /usr/include -name "bpf_helpers.h" 2>/dev/null || echo "not in /usr/include"
+          find /usr/include -name "bpf_endian.h" 2>/dev/null || echo "bpf_endian.h not found"
+          echo "=== libbpf package files ==="
+          dpkg -L libbpf-dev 2>/dev/null | grep -E "\.h$" | head -20 || echo "no libbpf-dev"
+          echo "=== try compile test ==="
+          echo '#include <linux/bpf.h>' > /tmp/test.c
+          echo 'SEC("xdp") int pass(struct xdp_md *ctx) { return XDP_PASS; }' >> /tmp/test.c
+          clang -O2 -g -Wall -target bpf -c /tmp/test.c -o /tmp/test.o 2>&1 && echo "basic BPF compile: OK" || echo "basic BPF compile: FAILED"
 
       - name: Build BPF programs
         run: make build-bpf
@@ -83,16 +84,6 @@ jobs:
         with:
           tag_name: v0.1.0
           name: v0.1.0
-          body: |
-            eBPF P2P CNI for Nomad - Initial Release
-            
-            Features:
-            - Zero veth container networking (bpf_redirect_peer)
-            - Geneve overlay tunnel
-            - STUN NAT traversal
-            - Kernel IPsec encryption
-            - VIP load balancing
-            - TC ACL firewall
-          files: |
-            bin/*
+          body: "eBPF P2P CNI for Nomad - Initial Release"
+          files: bin/*
           draft: false

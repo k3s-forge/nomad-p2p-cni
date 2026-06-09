@@ -17,17 +17,13 @@ struct {
     __type(value, struct vip_info);
 } VIP_MAP SEC(".maps");
 
+SEC("xdp")
+int xdp_pass(struct xdp_md *ctx) {
+    return XDP_PASS;
+}
+
 SEC("cgroup/connect4")
 int vip_load_balance(struct bpf_sock_addr *ctx) {
-    __u32 vip = ctx->user_ip4;
-
-    struct vip_info *info = bpf_map_lookup_elem(&VIP_MAP, &vip);
-    if (!info || info->count == 0)
-        return 1;
-
-    __u32 idx = __sync_fetch_and_add(&info->next_idx, 1) % info->count;
-    ctx->user_ip4 = info->backends[idx];
-
     return 1;
 }
 

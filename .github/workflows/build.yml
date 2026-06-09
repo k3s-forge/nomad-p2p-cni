@@ -1,0 +1,91 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev linux-headers-$(uname -r)
+
+      - name: Build BPF programs
+        run: |
+          make build-bpf
+
+      - name: Build Go binaries
+        run: |
+          make build-agent build-seed build-cni
+
+      - name: Run go vet
+        run: |
+          go vet ./...
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nomad-p2p-cni-binaries
+          path: bin/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev linux-headers-$(uname -r)
+
+      - name: Build all
+        run: make all
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.0
+          name: v0.1.0 - Initial Release
+          body: |
+            ## eBPF P2P CNI for Nomad
+            
+            ### Features
+            - Zero veth container networking via bpf_redirect_peer
+            - Geneve overlay tunnel with BPF map-driven routing
+            - STUN NAT traversal with UDP hole punching
+            - Kernel IPsec encryption
+            - VIP load balancing (cgroup/connect4)
+            - TC ACL firewall
+            
+            ### Binaries
+            - `nomad-p2p-agent` - Per-node control plane daemon
+            - `nomad-p2p-seed` - Route registry server
+            - `nomad-p2p-cni` - CNI plugin binary
+            
+            ### Requirements
+            - Linux 5.10+
+            - clang/llvm
+          files: |
+            bin/*
+          draft: false

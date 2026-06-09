@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
-	"syscall"
 )
 
 func HMACSign(psk string, data []byte) []byte {
@@ -35,10 +34,6 @@ func UnpackEndpoint(val uint64) (net.IP, int) {
 	ip := make(net.IP, 4)
 	binary.LittleEndian.PutUint32(ip, ipUint)
 	return ip, port
-}
-
-func SetSocketReusePort(fd uintptr) error {
-	return syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEPORT, 1)
 }
 
 func CreateUDPSocket(addr string) (*net.UDPConn, error) {

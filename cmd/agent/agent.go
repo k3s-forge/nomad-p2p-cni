@@ -123,7 +123,12 @@ func (a *Agent) Stop() {
 }
 
 func (a *Agent) loadBPF() error {
-	coll, err := ebpf.LoadCollection("mesh.bpf.o")
+	spec, err := ebpf.LoadCollectionSpec("bin/mesh.bpf.o")
+	if err != nil {
+		return fmt.Errorf("load BPF spec: %w", err)
+	}
+
+	coll, err := spec.Load(nil)
 	if err != nil {
 		return fmt.Errorf("load BPF collection: %w", err)
 	}
@@ -240,7 +245,7 @@ func (a *Agent) handleQueryResponse(msg Message) {
 			PublicPort: uint16(node.PublicPort),
 		}
 
-		a.maps.NodeDynamicMap.Update(overlayUint, ep, ebpf.UpdateAny)
+		a.maps.NodeDynamicMap.Update(overlayUint, ep, 0)
 
 		udpAddr := &net.UDPAddr{IP: publicIP, Port: node.PublicPort}
 		a.mu.Lock()

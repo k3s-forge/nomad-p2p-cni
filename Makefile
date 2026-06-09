@@ -2,17 +2,17 @@
 
 CLANG ?= clang
 
-# BPF compile flags
-BPF_CFLAGS := -O2 -g -Wall -target bpf
-
 BIN_DIR := bin
 
 all: build-bpf build-agent build-seed build-cni
 
 build-bpf: $(BIN_DIR)
-	$(CLANG) $(BPF_CFLAGS) -c bpf/mesh.bpf.c -o $(BIN_DIR)/mesh.bpf.o
-	$(CLANG) $(BPF_CFLAGS) -c bpf/vip_balancer.bpf.c -o $(BIN_DIR)/vip_balancer.bpf.o
-	$(CLANG) $(BPF_CFLAGS) -c bpf/firewall.bpf.c -o $(BIN_DIR)/firewall.bpf.o
+	$(CLANG) -O2 -g -Wall -target bpf -I/usr/include -I/usr/include/x86_64-linux-gnu \
+		-c bpf/mesh.bpf.c -o $(BIN_DIR)/mesh.bpf.o
+	$(CLANG) -O2 -g -Wall -target bpf -I/usr/include -I/usr/include/x86_64-linux-gnu \
+		-c bpf/vip_balancer.bpf.c -o $(BIN_DIR)/vip_balancer.bpf.o
+	$(CLANG) -O2 -g -Wall -target bpf -I/usr/include -I/usr/include/x86_64-linux-gnu \
+		-c bpf/firewall.bpf.c -o $(BIN_DIR)/firewall.bpf.o
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)

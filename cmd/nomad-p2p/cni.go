@@ -25,35 +25,44 @@ type NetConf struct {
 func handleCNI(command, containerID, netns string, stdinData []byte) error {
 	switch command {
 	case "ADD":
-		return cniAdd(containerID, netns, stdinData)
+		return cniAddFromArgs(containerID, netns, stdinData)
 	case "DEL":
-		return cniDel(containerID, netns, stdinData)
+		return cniDelFromArgs(containerID, netns, stdinData)
 	default:
 		return fmt.Errorf("unknown command: %s", command)
 	}
 }
 
-func cniAdd(containerID, netns string, stdinData []byte) error {
+// skel-compatible wrappers
+func cniAddSk(args *skel.CmdArgs) error {
+	return cniAddSkImpl(args)
+}
+
+func cniDelSk(args *skel.CmdArgs) error {
+	return cniDelSkImpl(args)
+}
+
+func cniAddSkImpl(args *skel.CmdArgs) error {
 	conf := &NetConf{}
-	if err := json.Unmarshal(stdinData, conf); err != nil {
+	if err := json.Unmarshal(args.StdinData, conf); err != nil {
 		return err
 	}
 	if conf.MTU == 0 {
 		conf.MTU = 1420
 	}
 
-	podIP, gateway, err := allocateIP(conf.Subnet, containerID)
+	podIP, gateway, err := allocateIP(conf.Subnet, args.ContainerID)
 	if err != nil {
 		return fmt.Errorf("allocate IP: %w", err)
 	}
 
-	if netns != "" {
-		if err := configureContainer(netns, podIP, gateway, conf.MTU); err != nil {
+	if args.Netns != "" {
+		if err := configureContainer(args.Netns, podIP, gateway, conf.MTU); err != nil {
 			return fmt.Errorf("configure container: %w", err)
 		}
 	}
 
-	log.Printf("[cni] ADD %s -> %s gw %s", containerID[:12], podIP, gateway)
+	log.Printf("[cni] ADD %s -> %s gw %s", args.ContainerID[:12], podIP, gateway)
 
 	result := &current.Result{
 		CNIVersion: conf.CniVersion,
@@ -67,7 +76,47 @@ func cniAdd(containerID, netns string, stdinData []byte) error {
 	return types.PrintResult(result, conf.CniVersion)
 }
 
-func cniDel(containerID, netns string, stdinData []byte) error {
+func cniDelSkImpl(args *skel.CmdArgs) error {
+	log.Printf("[cni] DEL %s", args.ContainerID[:12])
+	if args.Netns != "" {
+		cmd := exec.Command("ip", "netns", "del", args.Netns)
+		_ = cmd.Run()
+	}
+	return nil
+}
+
+// Non-skel wrappers for direct invocation
+func cniAddFromArgs(containerID, netns string, stdinData []byte) error {
+	conf := &NetConf{}
+	if err := json.Unmarshal(stdinData, conf); err != nil {
+		return err
+	}
+	if conf.MTU == 0 {
+		conf.MTU = 1420
+	}
+	podIP, gateway, err := allocateIP(conf.Subnet, containerID)
+	if err != nil {
+		return err
+	}
+	if netns != "" {
+		if err := configureContainer(netns, podIP, gateway, conf.MTU); err != nil {
+			return err
+		}
+	}
+	log.Printf("[cni] ADD %s -> %s", containerID[:12], podIP)
+	result := &current.Result{
+		CNIVersion: conf.CniVersion,
+		IPs: []*current.IPConfig{
+			{
+				Address: net.IPNet{IP: podIP, Mask: net.CIDRMask(32, 32)},
+				Gateway: gateway,
+			},
+		},
+	}
+	return types.PrintResult(result, conf.CniVersion)
+}
+
+func cniDelFromArgs(containerID, netns string, stdinData []byte) error {
 	log.Printf("[cni] DEL %s", containerID[:12])
 	if netns != "" {
 		cmd := exec.Command("ip", "netns", "del", netns)
@@ -117,7 +166,6 @@ func configureContainer(netns string, podIP net.IP, gateway net.IP, mtu int) err
 	return nil
 }
 
-// PluginMain for library compatibility
 func pluginMain() {
-	skel.PluginMain(cniAdd, nil, cniDel, version.All, "nomad-p2p v0.1.0")
+	skel.PluginMain(cniAddSk, nil, cniDelSk, version.All, "nomad-p2p v0.2.0")
 }

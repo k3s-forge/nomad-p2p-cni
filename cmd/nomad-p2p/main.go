@@ -69,7 +69,7 @@ func runAgent(args []string) {
 	seedMode := fs.Bool("seed-mode", false, "also run as Seed route registry")
 	fs.Parse(args)
 
-	cfg, err := loadConfig(*configPath)
+	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}

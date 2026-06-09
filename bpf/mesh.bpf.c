@@ -54,12 +54,6 @@ struct geneve_opt {
     __u32 opt_data;
 };
 
-static __always_inline int is_overlay_local(__u32 dst_ip) {
-    // Check if destination is in local container route map
-    __u32 *ifindex = bpf_map_lookup_elem(&CONTAINER_ROUTE_MAP, &dst_ip);
-    return ifindex != 0;
-}
-
 static __always_inline int lookup_remote_node(__u32 dst_ip, struct node_endpoint *ep) {
     // Check if destination matches any known remote node subnet
     // We use /24 matching: mask the last octet
@@ -103,7 +97,6 @@ int egress_p2p_mesh(struct __sk_buff *skb) {
         return TC_ACT_OK;
 
     __u32 dst_ip = iph->daddr;
-    __u32 src_ip = iph->saddr;
 
     // Check if destination is a local container
     __u32 *local_ifindex = bpf_map_lookup_elem(&CONTAINER_ROUTE_MAP, &dst_ip);

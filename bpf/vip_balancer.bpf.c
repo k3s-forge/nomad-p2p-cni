@@ -5,7 +5,6 @@
 // destination to a selected backend using round-robin
 
 #include <linux/bpf.h>
-#include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
@@ -45,29 +44,30 @@ int xdp_vip_pass(struct xdp_md *ctx) {
     return XDP_PASS;
 }
 
-// cgroup/connect4: intercept connect() calls to VIP addresses
 SEC("cgroup/connect4")
 int vip_load_balance(struct bpf_sock_addr *ctx) {
     __u32 vip = ctx->user_ip4;
 
     struct vip_info *info = bpf_map_lookup_elem(&VIP_MAP, &vip);
     if (!info || info->count == 0)
-        return 1; // allow connect as-is
+        return 1;
 
-    // Round-robin backend selection
-    __u32 idx = __sync_fetch_and_add(&info->next_idx, 1) % info->count;
+    __u32 idx = info->next_idx % info->count;
+
+    // Increment next_idx for next call (non-atomic is fine for LB)
+    __u32 new_idx = (idx + 1) % info->count;
+    info->next_idx = new_idx;
+
     __u32 backend = info->backends[idx];
     if (backend == 0)
         return 1;
 
-    // Rewrite destination to selected backend
     ctx->user_ip4 = backend;
 
-    // Update stats
     __u64 key = ((__u64)backend << 32) | ctx->user_port;
     struct vip_stats *stats = bpf_map_lookup_elem(&VIP_STATS_MAP, &key);
     if (stats) {
-        __sync_fetch_and_add(&stats->conns, 1);
+        stats->conns += 1;
     } else {
         struct vip_stats new_stats = { .conns = 1, .bytes = 0 };
         bpf_map_update_elem(&VIP_STATS_MAP, &key, &new_stats, BPF_ANY);

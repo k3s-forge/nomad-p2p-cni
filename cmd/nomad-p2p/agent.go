@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -115,6 +116,7 @@ func (s *seedRegistry) cleanup() {
 
 type Agent struct {
 	cfg        *config.Config
+	configPath string
 	maps       *BPFMaps
 	meshColl   *ebpf.Collection
 	vipColl    *ebpf.Collection
@@ -133,13 +135,14 @@ type Agent struct {
 	bpfLinks   []link.Link
 }
 
-func newAgent(cfg *config.Config, seedMode bool) (*Agent, error) {
+func newAgent(cfg *config.Config, configPath string, seedMode bool) (*Agent, error) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("remove memlock: %w", err)
 	}
 	return &Agent{
-		cfg:       cfg,
-		seedConns: make(map[string]*net.UDPConn),
+		cfg:        cfg,
+		configPath: configPath,
+		seedConns:  make(map[string]*net.UDPConn),
 		peerBook:  make(map[uint32]*net.UDPAddr),
 		stopCh:    make(chan struct{}),
 		seedMode:  seedMode,
@@ -197,6 +200,8 @@ func (a *Agent) run() error {
 		a.registerSelf()
 	}
 
+	go a.configHotReload()
+
 	log.Printf("[agent] ready (public: %s:%d)", a.publicIP, a.publicPort)
 	<-a.stopCh
 	a.shutdown()
@@ -222,7 +227,17 @@ func (a *Agent) loadBPF() error {
 		RouteMissRingbuf:  coll.Maps["ROUTE_MISS_RINGBUF"],
 	}
 	a.meshColl = coll
-	log.Printf("[agent] mesh BPF maps loaded")
+
+	// Pin BPF maps for CNI plugin access
+	pinDir := "/sys/fs/bpf/nomad-p2p"
+	exec.Command("mkdir", "-p", pinDir).Run()
+	if a.maps.ContainerRouteMap != nil {
+		a.maps.ContainerRouteMap.Pin(pinDir + "/container_route")
+	}
+	if a.maps.NodeDynamicMap != nil {
+		a.maps.NodeDynamicMap.Pin(pinDir + "/node_dynamic")
+	}
+	log.Printf("[agent] mesh BPF maps loaded and pinned to %s", pinDir)
 
 	// Load VIP balancer if enabled
 	if a.cfg.VIPEnabled {
@@ -899,6 +914,118 @@ func (a *Agent) ipsecRotationLoop() {
 			log.Printf("[agent] IPsec SA rotated (new SPI: 0x%08x)", a.ipSecMgr.spi)
 		}
 	}
+}
+
+// --- Config Hot Reload ---
+
+func (a *Agent) configHotReload() {
+	if a.configPath == "" {
+		return
+	}
+
+	var lastModTime time.Time
+	if info, err := os.Stat(a.configPath); err == nil {
+		lastModTime = info.ModTime()
+	}
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-a.stopCh:
+			return
+		case <-ticker.C:
+			info, err := os.Stat(a.configPath)
+			if err != nil {
+				continue
+			}
+			if info.ModTime().After(lastModTime) {
+				lastModTime = info.ModTime()
+				a.reloadConfig()
+			}
+		}
+	}
+}
+
+func (a *Agent) reloadConfig() {
+	newCfg, err := config.Load(a.configPath)
+	if err != nil {
+		log.Printf("[agent] config reload failed: %v", err)
+		return
+	}
+
+	log.Printf("[agent] config reloaded")
+
+	// Update firewall ACLs
+	if a.cfg.FirewallEnabled != newCfg.FirewallEnabled ||
+		a.cfg.DefaultPolicy != newCfg.DefaultPolicy {
+		a.cfg.FirewallEnabled = newCfg.FirewallEnabled
+		a.cfg.DefaultPolicy = newCfg.DefaultPolicy
+		a.reloadFirewallACLs(newCfg)
+	}
+
+	// Update allowed sources
+	if stringSliceChanged(a.cfg.AllowedSources, newCfg.AllowedSources) {
+		a.cfg.AllowedSources = newCfg.AllowedSources
+		a.reloadFirewallACLs(newCfg)
+	}
+
+	// Update allowed ports
+	if len(a.cfg.AllowedPorts) != len(newCfg.AllowedPorts) {
+		a.cfg.AllowedPorts = newCfg.AllowedPorts
+		a.reloadFirewallACLs(newCfg)
+	}
+
+	// Update VIP watch list
+	if stringSliceChanged(a.cfg.VIPWatchList, newCfg.VIPWatchList) {
+		a.cfg.VIPWatchList = newCfg.VIPWatchList
+		log.Printf("[agent] VIP watch list updated: %v", newCfg.VIPWatchList)
+	}
+}
+
+func (a *Agent) reloadFirewallACLs(newCfg *config.Config) {
+	if a.maps.ACLMap == nil {
+		return
+	}
+
+	// Clear existing ACLs by resetting the default policy
+	if a.maps.DefaultPolicy != nil {
+		key := uint32(0)
+		val := uint8(0)
+		if newCfg.DefaultPolicy == "allow" {
+			val = 1
+		}
+		a.maps.DefaultPolicy.Update(key, val, 0)
+	}
+
+	// Clear old IP ACLs
+	if a.maps.ACLMap != nil {
+		a.maps.ACLMap.Close()
+		a.maps.ACLMap = nil
+	}
+
+	// Reload from new config
+	a.cfg.AllowedSources = newCfg.AllowedSources
+	a.cfg.AllowedPorts = newCfg.AllowedPorts
+	a.loadACLsFromConfig()
+	log.Printf("[agent] firewall ACLs reloaded")
+}
+
+func stringSliceChanged(a, b []string) bool {
+	if len(a) != len(b) {
+		return true
+	}
+	m := make(map[string]bool, len(a))
+	for _, s := range a {
+		m[s] = true
+	}
+	for _, s := range b {
+		if !m[s] {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Shutdown ---

@@ -76,7 +76,7 @@ func runAgent(args []string) {
 		log.Fatalf("load config: %v", err)
 	}
 
-	agent, err := newAgent(cfg, *seedMode)
+	agent, err := newAgent(cfg, *configPath, *seedMode)
 	if err != nil {
 		log.Fatalf("create agent: %v", err)
 	}

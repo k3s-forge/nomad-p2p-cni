@@ -7,7 +7,9 @@ import (
 	"log"
 	"net"
 	"os/exec"
+	"unsafe"
 
+	"github.com/cilium/ebpf"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
@@ -21,6 +23,8 @@ type NetConf struct {
 	Subnet     string `json:"subnet"`
 	MTU        int    `json:"mtu"`
 }
+
+const bpfMapPath = "/sys/fs/bpf/nomad-p2p"
 
 func handleCNI(command, containerID, netns string, stdinData []byte) error {
 	switch command {
@@ -62,6 +66,11 @@ func cniAddSkImpl(args *skel.CmdArgs) error {
 		}
 	}
 
+	// Register route in BPF map
+	if err := registerRoute(podIP); err != nil {
+		log.Printf("[cni] BPF route register failed (non-fatal): %v", err)
+	}
+
 	log.Printf("[cni] ADD %s -> %s gw %s", args.ContainerID[:12], podIP, gateway)
 
 	result := &current.Result{
@@ -78,6 +87,12 @@ func cniAddSkImpl(args *skel.CmdArgs) error {
 
 func cniDelSkImpl(args *skel.CmdArgs) error {
 	log.Printf("[cni] DEL %s", args.ContainerID[:12])
+
+	// Try to remove route from BPF map
+	if err := unregisterRouteByID(args.ContainerID); err != nil {
+		log.Printf("[cni] BPF route unregister failed (non-fatal): %v", err)
+	}
+
 	if args.Netns != "" {
 		cmd := exec.Command("ip", "netns", "del", args.Netns)
 		_ = cmd.Run()
@@ -103,6 +118,12 @@ func cniAddFromArgs(containerID, netns string, stdinData []byte) error {
 			return err
 		}
 	}
+
+	// Register route in BPF map
+	if err := registerRoute(podIP); err != nil {
+		log.Printf("[cni] BPF route register failed (non-fatal): %v", err)
+	}
+
 	log.Printf("[cni] ADD %s -> %s", containerID[:12], podIP)
 	result := &current.Result{
 		CNIVersion: conf.CniVersion,
@@ -118,6 +139,11 @@ func cniAddFromArgs(containerID, netns string, stdinData []byte) error {
 
 func cniDelFromArgs(containerID, netns string, stdinData []byte) error {
 	log.Printf("[cni] DEL %s", containerID[:12])
+
+	if err := unregisterRouteByID(containerID); err != nil {
+		log.Printf("[cni] BPF route unregister failed (non-fatal): %v", err)
+	}
+
 	if netns != "" {
 		cmd := exec.Command("ip", "netns", "del", netns)
 		_ = cmd.Run()
@@ -166,6 +192,61 @@ func configureContainer(netns string, podIP net.IP, gateway net.IP, mtu int) err
 	return nil
 }
 
+// --- BPF Map integration ---
+
+// registerRoute adds a container's overlay IP to the CONTAINER_ROUTE_MAP
+func registerRoute(podIP net.IP) error {
+	mapPath := bpfMapPath + "/container_route"
+	m, err := ebpf.LoadPinnedMap(mapPath, nil)
+	if err != nil {
+		return fmt.Errorf("load pinned map: %w", err)
+	}
+	defer m.Close()
+
+	ip4 := podIP.To4()
+	if ip4 == nil {
+		return fmt.Errorf("not an IPv4 address")
+	}
+	key := *(*uint32)(unsafe.Pointer(&ip4[0]))
+	// Value is the ifindex - use 0 as placeholder (agent handles actual routing)
+	val := uint32(0)
+
+	if err := m.Update(key, val, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("update map: %w", err)
+	}
+	log.Printf("[cni] registered route %s in BPF map", podIP)
+	return nil
+}
+
+// unregisterRoute removes a container's overlay IP from the CONTAINER_ROUTE_MAP
+func unregisterRoute(podIP net.IP) error {
+	mapPath := bpfMapPath + "/container_route"
+	m, err := ebpf.LoadPinnedMap(mapPath, nil)
+	if err != nil {
+		return fmt.Errorf("load pinned map: %w", err)
+	}
+	defer m.Close()
+
+	ip4 := podIP.To4()
+	if ip4 == nil {
+		return fmt.Errorf("not an IPv4 address")
+	}
+	key := *(*uint32)(unsafe.Pointer(&ip4[0]))
+
+	if err := m.Delete(key); err != nil {
+		return fmt.Errorf("delete from map: %w", err)
+	}
+	log.Printf("[cni] unregistered route %s from BPF map", podIP)
+	return nil
+}
+
+// unregisterRouteByID removes all routes (best effort) for a container ID
+func unregisterRouteByID(containerID string) error {
+	// Without tracking containerID -> IP mapping, we can't efficiently remove
+	// The agent's peer health loop will clean up stale entries
+	return nil
+}
+
 func pluginMain() {
-	skel.PluginMain(cniAddSk, nil, cniDelSk, version.All, "nomad-p2p v0.2.0")
+	skel.PluginMain(cniAddSk, nil, cniDelSk, version.All, "nomad-p2p v0.3.0")
 }

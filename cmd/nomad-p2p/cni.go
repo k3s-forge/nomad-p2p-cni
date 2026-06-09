@@ -28,6 +28,13 @@ type NetConf struct {
 
 const bpfMapPath = "/sys/fs/bpf/nomad-p2p"
 
+func shortID(id string) string {
+	if len(id) > 12 {
+		return id[:12]
+	}
+	return id
+}
+
 func handleCNI(command, containerID, netns string, stdinData []byte) error {
 	switch command {
 	case "ADD":
@@ -77,7 +84,7 @@ func cniAddSk(args *skel.CmdArgs) error {
 		}
 	}
 
-	log.Printf("[cni] ADD %s -> %s", args.ContainerID[:12], podIP)
+	log.Printf("[cni] ADD %s -> %s", shortID(args.ContainerID), podIP)
 
 	result := &current.Result{
 		CNIVersion: conf.CniVersion,
@@ -92,7 +99,7 @@ func cniAddSk(args *skel.CmdArgs) error {
 }
 
 func cniDelSk(args *skel.CmdArgs) error {
-	log.Printf("[cni] DEL %s", args.ContainerID[:12])
+	log.Printf("[cni] DEL %s", shortID(args.ContainerID))
 
 	// Try to remove TC filter from any veth we can find
 	cleanupTCFilters()
@@ -136,7 +143,7 @@ func cniAddFromArgs(containerID, netns string, stdinData []byte) error {
 		}
 	}
 
-	log.Printf("[cni] ADD %s -> %s", containerID[:12], podIP)
+	log.Printf("[cni] ADD %s -> %s", shortID(containerID), podIP)
 	result := &current.Result{
 		CNIVersion: conf.CniVersion,
 		IPs: []*current.IPConfig{
@@ -150,7 +157,7 @@ func cniAddFromArgs(containerID, netns string, stdinData []byte) error {
 }
 
 func cniDelFromArgs(containerID, netns string, stdinData []byte) error {
-	log.Printf("[cni] DEL %s", containerID[:12])
+	log.Printf("[cni] DEL %s", shortID(containerID))
 	cleanupTCFilters()
 	if netns != "" {
 		cmd := exec.Command("ip", "netns", "del", netns)

@@ -275,17 +275,10 @@ func (a *Agent) loadBPF() error {
 		} else {
 			a.maps.ACLMap = fwColl.Maps["ACL_MAP"]
 			a.maps.PortACLMap = fwColl.Maps["PORT_ACL_MAP"]
-			a.maps.DefaultPolicy = fwColl.Maps["DEFAULT_POLICY"]
-				a.fwColl = fwColl
-			// Set default policy to allow-all for overlay traffic
-			if a.maps.DefaultPolicy != nil {
-				key := uint32(0)
-				val := uint8(1)
-				a.maps.DefaultPolicy.Update(key, val, 0)
-			}
-			log.Printf("[agent] firewall BPF loaded")
-			a.loadACLsFromConfig()
-		}
+a.maps.DefaultPolicy = fwColl.Maps["DEFAULT_POLICY"]
+		a.fwColl = fwColl
+		a.loadACLsFromConfig()
+	}
 	}
 
 	return nil
@@ -409,20 +402,14 @@ func (a *Agent) attachBPF() error {
 }
 
 func (a *Agent) attachTC(ifIndex uint32, prog *ebpf.Program, direction string) error {
-	// Ensure clsact qdisc exists on the interface
-	cmd := exec.Command("tc", "qdisc", "add", "dev", fmt.Sprintf("lo"),
-		"clsact")
-	cmd.Run() // ignore error if already exists
-
-	// Get the interface name from index
 	iface, err := net.InterfaceByIndex(int(ifIndex))
 	if err != nil {
 		return fmt.Errorf("get interface: %w", err)
 	}
 
 	// Add clsact qdisc
-	cmd = exec.Command("tc", "qdisc", "add", "dev", iface.Name, "clsact")
-	cmd.Run() // ignore "exists" error
+	cmd := exec.Command("tc", "qdisc", "add", "dev", iface.Name, "clsact")
+	cmd.Run()
 
 	// Pin the program to bpffs so tc can find it
 	pinPath := fmt.Sprintf("/sys/fs/bpf/tc/%s_%d", direction, ifIndex)
@@ -897,14 +884,6 @@ func (a *Agent) setupGeneveDevice() error {
 		return fmt.Errorf("addr: %w: %s", err, out)
 	}
 
-	// Add routes for known peer subnets
-	a.mu.RLock()
-	for _, ep := range a.peerBook {
-		// Route through geneve for overlay traffic
-		_ = ep
-	}
-	a.mu.RUnlock()
-
 	log.Printf("[agent] geneve %s = %s", a.cfg.TunnelDevice, a.cfg.NodeOverlayIP)
 	return nil
 }
@@ -1021,7 +1000,7 @@ func (a *Agent) reloadFirewallACLs(newCfg *config.Config) {
 		return
 	}
 
-	// Clear existing ACLs by resetting the default policy
+	// Set default policy
 	if a.maps.DefaultPolicy != nil {
 		key := uint32(0)
 		val := uint8(0)
@@ -1031,10 +1010,19 @@ func (a *Agent) reloadFirewallACLs(newCfg *config.Config) {
 		a.maps.DefaultPolicy.Update(key, val, 0)
 	}
 
-	// Clear old IP ACLs
-	if a.maps.ACLMap != nil {
-		a.maps.ACLMap.Close()
-		a.maps.ACLMap = nil
+	// Delete existing entries by iterating and deleting
+	var key uint32
+	var val uint8
+	iter := a.maps.ACLMap.Iterate()
+	for iter.Next(&key, &val) {
+		a.maps.ACLMap.Delete(key)
+	}
+
+	var portKey uint64
+	var portVal uint8
+	portIter := a.maps.PortACLMap.Iterate()
+	for portIter.Next(&portKey, &portVal) {
+		a.maps.PortACLMap.Delete(portKey)
 	}
 
 	// Reload from new config

@@ -103,8 +103,7 @@ func (c *consulClient) queryVIPBackends(vip string) ([]net.IP, error) {
 			continue
 		}
 		for _, inst := range instances {
-			// Match VIP by service address or meta["vip"] field
-			if inst.Address == vip || inst.Meta["vip"] == vip {
+			if inst.Meta["vip"] == vip {
 				ip := net.ParseIP(inst.Address).To4()
 				if ip != nil {
 					allBackends = append(allBackends, ip)

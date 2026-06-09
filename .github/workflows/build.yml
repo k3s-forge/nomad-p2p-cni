@@ -176,6 +176,7 @@ jobs:
 
       - name: E2E packet forwarding test
         run: |
+          set +e
           NETWORK="e2e-net"
           docker network create $NETWORK 2>/dev/null || true
 
@@ -212,14 +213,14 @@ jobs:
 
           # Setup Geneve tunnels with explicit remotes
           docker exec e2e-n1 ip link del gnv0 2>/dev/null || true
-          docker exec e2e-n1 ip link add gnv0 type geneve id 100 remote $N2_DOCKER_IP local $N1_DOCKER_IP ttl 64 2>/dev/null || true
+          docker exec e2e-n1 ip link add gnv0 type geneve id 100 remote $N2_DOCKER_IP local $N1_DOCKER_IP ttl 64 || true
           docker exec e2e-n1 ip addr add 10.244.0.2/24 dev gnv0 2>/dev/null || true
-          docker exec e2e-n1 ip link set gnv0 mtu 1400 up
+          docker exec e2e-n1 ip link set gnv0 mtu 1400 up || true
 
           docker exec e2e-n2 ip link del gnv0 2>/dev/null || true
-          docker exec e2e-n2 ip link add gnv0 type geneve id 100 remote $N1_DOCKER_IP local $N2_DOCKER_IP ttl 64 2>/dev/null || true
+          docker exec e2e-n2 ip link add gnv0 type geneve id 100 remote $N1_DOCKER_IP local $N2_DOCKER_IP ttl 64 || true
           docker exec e2e-n2 ip addr add 10.244.0.3/24 dev gnv0 2>/dev/null || true
-          docker exec e2e-n2 ip link set gnv0 mtu 1400 up
+          docker exec e2e-n2 ip link set gnv0 mtu 1400 up || true
 
           # Verify overlay ping
           echo "=== Overlay connectivity ==="

@@ -295,8 +295,7 @@ func attachTCToVethPeer(ifindex uint32) error {
 	// Ensure clsact qdisc
 	exec.Command("tc", "qdisc", "add", "dev", ifName, "clsact").Run()
 
-	// Pin the TC program
-	pinPath := fmt.Sprintf("/sys/fs/bpf/tc/egress_%d", ifindex)
+	// Use the pinned BPF program
 	progPath := bpfMapPath + "/mesh_prog"
 
 	// Try to find the pinned program

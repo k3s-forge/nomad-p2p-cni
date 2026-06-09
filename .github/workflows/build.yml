@@ -132,13 +132,55 @@ jobs:
           docker rm -f seed-node node-1 node-2 2>/dev/null || true
           docker network rm $NETWORK 2>/dev/null || true
 
+      - name: Cross-node overlay test
+        run: |
+          docker network create ping-net 2>/dev/null || true
+
+          docker run -d --name ping-seed \
+            --network ping-net \
+            --privileged --cap-add=SYS_ADMIN --cap-add=NET_ADMIN \
+            --cgroupns=host -v /sys/fs/bpf:/sys/fs/bpf \
+            nomad-p2p-test seed
+          sleep 3
+          SEED_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ping-seed)
+
+          docker run -d --name ping-n1 \
+            --network ping-net \
+            --privileged --cap-add=SYS_ADMIN --cap-add=NET_ADMIN \
+            --cgroupns=host -v /sys/fs/bpf:/sys/fs/bpf \
+            -e SEED_ADDR="${SEED_IP}:9527" \
+            -e NODE_OVERLAY_IP="10.244.0.2" \
+            nomad-p2p-test agent
+          sleep 3
+
+          docker run -d --name ping-n2 \
+            --network ping-net \
+            --privileged --cap-add=SYS_ADMIN --cap-add=NET_ADMIN \
+            --cgroupns=host -v /sys/fs/bpf:/sys/fs/bpf \
+            -e SEED_ADDR="${SEED_IP}:9527" \
+            -e NODE_OVERLAY_IP="10.244.0.3" \
+            nomad-p2p-test agent
+          sleep 5
+
+          # Verify geneve devices and overlay IPs
+          docker exec ping-n1 ip link show gnv0 && echo "N1 geneve OK"
+          docker exec ping-n2 ip link show gnv0 && echo "N2 geneve OK"
+          docker exec ping-n1 ip addr show gnv0 | grep "10.244.0.2" && echo "N1 IP OK"
+          docker exec ping-n2 ip addr show gnv0 | grep "10.244.0.3" && echo "N2 IP OK"
+
+          # Check registrations on seed
+          docker logs ping-seed 2>&1 | grep "registered" | tail -5
+
+          docker rm -f ping-seed ping-n1 ping-n2 2>/dev/null || true
+          docker network rm ping-net 2>/dev/null || true
+
       - name: Cleanup
         if: always()
         run: |
           docker stop test-node 2>/dev/null || true
           docker rm test-node 2>/dev/null || true
-          docker rm -f seed-node node-1 node-2 2>/dev/null || true
-          docker network rm nomad-p2p-net 2>/dev/null || true
+          docker rm -f seed-node node-1 node-2 ping-seed ping-n1 ping-n2 2>/dev/null || true
+          docker network rm nomad-p2p-net ping-net 2>/dev/null || true
 
   release:
     needs: build

@@ -21,6 +21,8 @@
   "mtu": 1420,
   "vip_enabled": false,
   "vip_watch_list": [],
+  "consul_addr": "",
+  "consul_token": "",
   "firewall_enabled": false,
   "default_policy": "allow",
   "allowed_sources": [],

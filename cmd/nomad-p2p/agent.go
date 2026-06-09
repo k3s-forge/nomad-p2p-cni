@@ -180,7 +180,11 @@ func (a *Agent) run() error {
 	go a.peerHealthLoop()
 
 	if a.cfg.VIPEnabled {
-		go a.watchVIPs()
+		if a.cfg.ConsulAddr != "" {
+			go a.watchVIPsFromConsul()
+		} else {
+			go a.watchVIPs()
+		}
 	}
 
 	if a.cfg.IPsecEnabled {
@@ -335,7 +339,10 @@ func (a *Agent) attachBPF() error {
 	// Attach mesh XDP program
 	if a.meshColl != nil {
 		if xdpProg, ok := a.meshColl.Programs["xdp_pass"]; ok {
-			l, err := link.AttachXDP(iface, xdpProg, 0)
+			l, err := link.AttachXDP(link.XDPOptions{
+				Interface: iface.Index,
+				Program:   xdpProg,
+			})
 			if err != nil {
 				log.Printf("[agent] XDP attach failed: %v", err)
 			} else {
@@ -404,10 +411,6 @@ func (a *Agent) attachTC(ifIndex uint32, prog *ebpf.Program, direction string) e
 	}
 
 	// Attach via tc
-	filter := "1"
-	if direction == "ingress" {
-		filter = "1"
-	}
 	cmd = exec.Command("tc", "filter", "add", "dev", iface.Name, direction,
 		"pref", "1", "handle", "1", "bpf", "direct-action", "pinned", pinPath)
 	if out, err := cmd.CombinedOutput(); err != nil {

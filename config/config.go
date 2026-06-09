@@ -42,6 +42,10 @@ type Config struct {
 	VIPEnabled   bool     `json:"vip_enabled"`
 	VIPWatchList []string `json:"vip_watch_list"` // VIPs to watch
 
+	// Consul integration
+	ConsulAddr  string `json:"consul_addr"`  // Consul HTTP address (e.g. "127.0.0.1:8500")
+	ConsulToken string `json:"consul_token"` // Consul ACL token (optional)
+
 	// Firewall ACL settings
 	FirewallEnabled bool          `json:"firewall_enabled"`
 	DefaultPolicy   string        `json:"default_policy"` // "allow" or "deny"

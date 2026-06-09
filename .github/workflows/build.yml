@@ -22,28 +22,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev
 
-      - name: Debug BPF environment
-        run: |
-          echo "=== clang version ==="
-          clang --version
-          echo "=== BPF headers ==="
-          find /usr/include -name "bpf_helpers.h" 2>/dev/null || echo "not in /usr/include"
-          find /usr/include -name "bpf_endian.h" 2>/dev/null || echo "bpf_endian.h not found"
-          echo "=== libbpf package files ==="
-          dpkg -L libbpf-dev 2>/dev/null | grep -E "\.h$" | head -20 || echo "no libbpf-dev"
-          echo "=== try compile test ==="
-          echo '#include <linux/bpf.h>' > /tmp/test.c
-          echo 'SEC("xdp") int pass(struct xdp_md *ctx) { return XDP_PASS; }' >> /tmp/test.c
-          clang -O2 -g -Wall -target bpf -c /tmp/test.c -o /tmp/test.o 2>&1 && echo "basic BPF compile: OK" || echo "basic BPF compile: FAILED"
-
       - name: Build BPF programs
         run: make build-bpf
 
-      - name: Build Go binaries
+      - name: Resolve Go dependencies
         run: |
-          make build-agent
-          make build-seed
-          make build-cni
+          go mod tidy
+          go mod download
+
+      - name: Build agent (verbose)
+        run: go build -v -o bin/nomad-p2p-agent ./cmd/agent 2>&1
+
+      - name: Build seed (verbose)
+        run: go build -v -o bin/nomad-p2p-seed ./cmd/seed 2>&1
+
+      - name: Build cni (verbose)
+        run: go build -v -o bin/nomad-p2p-cni ./cmd/cni 2>&1
 
       - name: Run go vet
         run: go vet ./...
@@ -77,7 +71,10 @@ jobs:
           sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev
 
       - name: Build all
-        run: make all
+        run: |
+          go mod tidy
+          go mod download
+          make all
 
       - name: Create Release
         uses: softprops/action-gh-release@v2

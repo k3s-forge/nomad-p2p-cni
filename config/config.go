@@ -39,8 +39,9 @@ type Config struct {
 	MTU        int    `json:"mtu"`
 
 	// VIP settings
-	VIPEnabled   bool     `json:"vip_enabled"`
-	VIPWatchList []string `json:"vip_watch_list"` // VIPs to watch
+	VIPEnabled   bool           `json:"vip_enabled"`
+	VIPWatchList []string       `json:"vip_watch_list"` // VIPs to watch
+	VIPBackends  []VIPBackend   `json:"vip_backends"`   // Static VIP->backend mappings (no Consul needed)
 
 	// Consul integration
 	ConsulAddr  string `json:"consul_addr"`  // Consul HTTP address (e.g. "127.0.0.1:8500")
@@ -62,6 +63,11 @@ type PortRule struct {
 	Port     int    `json:"port"`      // destination port
 	Protocol string `json:"protocol"`  // "tcp" or "udp"
 	Allow    bool   `json:"allow"`     // true=allow, false=deny
+}
+
+type VIPBackend struct {
+	VIP     string   `json:"vip"`     // VIP address (e.g. "10.100.0.50")
+	Backends []string `json:"backends"` // Backend IP addresses
 }
 
 func Load(path string) (*Config, error) {

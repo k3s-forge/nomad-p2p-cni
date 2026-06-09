@@ -21,6 +21,12 @@
   "mtu": 1420,
   "vip_enabled": false,
   "vip_watch_list": [],
+  "vip_backends": [
+    {
+      "vip": "10.100.0.50",
+      "backends": ["10.244.0.10", "10.244.1.10", "10.244.2.10"]
+    }
+  ],
   "consul_addr": "",
   "consul_token": "",
   "firewall_enabled": false,

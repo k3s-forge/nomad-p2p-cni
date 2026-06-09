@@ -72,9 +72,9 @@ func (c *consulClient) queryService(service string) ([]ConsulService, error) {
 	return services, nil
 }
 
-// queryVIPBackends returns backend IPs for a VIP from Consul service
+// queryVIPBackends returns all healthy backend IPs for a VIP from Consul
 func (c *consulClient) queryVIPBackends(vip string) ([]net.IP, error) {
-	// Try to find service by VIP address in service meta
+	// List all services
 	url := fmt.Sprintf("http://%s/v1/catalog/services", c.addr)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -95,23 +95,28 @@ func (c *consulClient) queryVIPBackends(vip string) ([]net.IP, error) {
 		return nil, err
 	}
 
-	// For each service, check if any instance matches this VIP
+	// For each service, query healthy instances and collect backends matching the VIP
+	var allBackends []net.IP
 	for name := range serviceNames {
 		instances, err := c.queryService(name)
 		if err != nil {
 			continue
 		}
 		for _, inst := range instances {
+			// Match VIP by service address or meta["vip"] field
 			if inst.Address == vip || inst.Meta["vip"] == vip {
 				ip := net.ParseIP(inst.Address).To4()
 				if ip != nil {
-					return []net.IP{ip}, nil
+					allBackends = append(allBackends, ip)
 				}
 			}
 		}
 	}
 
-	return nil, fmt.Errorf("no backends found for VIP %s", vip)
+	if len(allBackends) == 0 {
+		return nil, fmt.Errorf("no healthy backends found for VIP %s", vip)
+	}
+	return allBackends, nil
 }
 
 // watchVIPsFromConsul polls Consul and updates BPF VIP_MAP
@@ -149,10 +154,24 @@ func (a *Agent) updateVIPsFromConsul(client *consulClient) {
 		}
 		vipU := *(*uint32)(unsafe.Pointer(&vip[0]))
 
-		backends, err := client.queryVIPBackends(vipStr)
+		// Start with static backends from config
+		backends := a.getStaticVIPBackends(vipStr)
+
+		// Merge in Consul-discovered backends
+		consulBackends, err := client.queryVIPBackends(vipStr)
 		if err != nil {
 			log.Printf("[agent] VIP query failed for %s: %v", vipStr, err)
-			continue
+		} else {
+			// Deduplicate
+			existing := make(map[string]bool)
+			for _, ip := range backends {
+				existing[ip.String()] = true
+			}
+			for _, ip := range consulBackends {
+				if !existing[ip.String()] {
+					backends = append(backends, ip)
+				}
+			}
 		}
 
 		if len(backends) == 0 {
@@ -171,6 +190,6 @@ func (a *Agent) updateVIPsFromConsul(client *consulClient) {
 		}
 
 		a.maps.VIPMap.Update(vipU, info, 0)
-		log.Printf("[agent] VIP %s updated: %d backends", vipStr, len(backends))
+		log.Printf("[agent] VIP %s updated: %d backends (static + consul)", vipStr, len(backends))
 	}
 }

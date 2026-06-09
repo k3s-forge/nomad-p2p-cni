@@ -822,8 +822,6 @@ func (a *Agent) watchVIPs() {
 		case <-a.stopCh:
 			return
 		case <-ticker.C:
-			// TODO: query Consul/Nomad for VIP backends
-			// For now, update VIP map from config
 			a.updateVIPsFromConfig()
 		}
 	}
@@ -840,14 +838,41 @@ func (a *Agent) updateVIPsFromConfig() {
 		}
 		vipU := *(*uint32)(unsafe.Pointer(&vip[0]))
 
-		// TODO: get backends from Consul/Nomad
-		// For now, use a placeholder
+		// Check static backends first
+		backends := a.getStaticVIPBackends(vipStr)
+
+		if len(backends) == 0 {
+			continue
+		}
+
 		info := VIPInfo{
-			Count:   0,
+			Count:   uint8(len(backends)),
 			NextIdx: 0,
+		}
+		for i, backend := range backends {
+			if i >= 16 {
+				break
+			}
+			info.Backends[i] = *(*uint32)(unsafe.Pointer(&backend[0]))
 		}
 		a.maps.VIPMap.Update(vipU, info, 0)
 	}
+}
+
+// getStaticVIPBackends returns backend IPs from config's VIPBackends
+func (a *Agent) getStaticVIPBackends(vipStr string) []net.IP {
+	for _, vb := range a.cfg.VIPBackends {
+		if vb.VIP == vipStr {
+			var ips []net.IP
+			for _, addr := range vb.Backends {
+				if ip := net.ParseIP(addr); ip != nil {
+					ips = append(ips, ip)
+				}
+			}
+			return ips
+		}
+	}
+	return nil
 }
 
 // --- Geneve & IPsec ---

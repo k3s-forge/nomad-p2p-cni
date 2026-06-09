@@ -17,38 +17,27 @@ jobs:
         with:
           go-version: '1.22'
 
-      - name: Install BPF build dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev
 
-      - name: Build BPF programs
+      - name: Build BPF
         run: make build-bpf
 
-      - name: Resolve Go dependencies
+      - name: Build binary
         run: |
           go mod tidy
           go mod download
+          make build-bin
 
-      - name: Build agent (verbose)
-        run: go build -v -o bin/nomad-p2p-agent ./cmd/agent 2>&1
-
-      - name: Build seed (verbose)
-        run: go build -v -o bin/nomad-p2p-seed ./cmd/seed 2>&1
-
-      - name: Build cni (verbose)
-        run: go build -v -o bin/nomad-p2p-cni ./cmd/cni 2>&1
-
-      - name: Run go vet
+      - name: Vet
         run: go vet ./...
 
-      - name: List built artifacts
-        run: ls -la bin/
-
-      - name: Upload artifacts
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: nomad-p2p-cni-binaries
+          name: nomad-p2p
           path: bin/
 
   release:
@@ -65,7 +54,7 @@ jobs:
         with:
           go-version: '1.22'
 
-      - name: Install BPF build dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev
@@ -76,11 +65,17 @@ jobs:
           go mod download
           make all
 
-      - name: Create Release
+      - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.1.0
-          name: v0.1.0
-          body: "eBPF P2P CNI for Nomad - Initial Release"
+          tag_name: v0.2.0
+          name: v0.2.0
+          body: |
+            ## v0.2.0 - Unified Binary
+            
+            Single binary `nomad-p2p` with three modes:
+            - `nomad-p2p agent` - control plane daemon
+            - `nomad-p2p agent --seed-mode` - also run as seed registry
+            - `nomad-p2p cni` - CNI plugin
           files: bin/*
           draft: false

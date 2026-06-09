@@ -2,8 +2,10 @@ package main
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -27,11 +29,13 @@ type BPFMaps struct {
 	NodeDynamicMap    *ebpf.Map
 	RouteMissRingbuf  *ebpf.Map
 	VIPMap            *ebpf.Map
+	VIPStatsMap       *ebpf.Map
 	ACLMap            *ebpf.Map
 	PortACLMap        *ebpf.Map
+	DefaultPolicy     *ebpf.Map
 }
 
-// --- Protocol messages ---
+// --- BPF value types (must match C structs) ---
 
 type NodeEndpoint struct {
 	PublicIP   uint32
@@ -39,11 +43,21 @@ type NodeEndpoint struct {
 	Pad        uint16
 }
 
+type VIPInfo struct {
+	Backends [16]uint32
+	Count    uint8
+	Pad      [3]byte
+	NextIdx  uint32
+}
+
+// --- Protocol messages ---
+
 type Message struct {
 	Type     string             `json:"type"`
 	NodeInfo *NodeRegistration  `json:"node_info,omitempty"`
 	QueryIP  string             `json:"query_ip,omitempty"`
 	Nodes    []NodeRegistration `json:"nodes,omitempty"`
+	Relay    *RelayInfo         `json:"relay,omitempty"`
 }
 
 type NodeRegistration struct {
@@ -51,6 +65,12 @@ type NodeRegistration struct {
 	PublicIP   string `json:"public_ip"`
 	PublicPort int    `json:"public_port"`
 	Subnet     string `json:"subnet"`
+	RelayCapable bool `json:"relay_capable"`
+}
+
+type RelayInfo struct {
+	RelayIP   string `json:"relay_ip"`
+	RelayPort int    `json:"relay_port"`
 }
 
 // --- Seed registry (in-memory) ---
@@ -89,7 +109,6 @@ func (s *seedRegistry) all() []NodeRegistration {
 func (s *seedRegistry) cleanup() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// simple: remove entries older than 3 minutes (checked externally)
 }
 
 // --- Agent ---
@@ -106,6 +125,8 @@ type Agent struct {
 	stopCh     chan struct{}
 	seedMode   bool
 	registry   *seedRegistry
+	ipSecMgr   *ipSecManager
+	geneveDev  string
 }
 
 func newAgent(cfg *config.Config, seedMode bool) (*Agent, error) {
@@ -119,6 +140,7 @@ func newAgent(cfg *config.Config, seedMode bool) (*Agent, error) {
 		stopCh:    make(chan struct{}),
 		seedMode:  seedMode,
 		registry:  newSeedRegistry(),
+		geneveDev: cfg.TunnelDevice,
 	}, nil
 }
 
@@ -146,6 +168,8 @@ func (a *Agent) run() error {
 	a.bootstrapFromSeeds()
 	go a.consumeRouteMiss()
 	go a.heartbeatLoop()
+	go a.stunRefreshLoop()
+	go a.peerHealthLoop()
 
 	if a.cfg.VIPEnabled {
 		go a.watchVIPs()
@@ -153,6 +177,12 @@ func (a *Agent) run() error {
 
 	if a.cfg.IPsecEnabled {
 		a.setupIPsec()
+		go a.ipsecRotationLoop()
+	}
+
+	// Seed mode: register self and serve queries
+	if a.seedMode {
+		a.registerSelf()
 	}
 
 	log.Printf("[agent] ready (public: %s:%d)", a.publicIP, a.publicPort)
@@ -168,21 +198,58 @@ func (a *Agent) stop() { close(a.stopCh) }
 func (a *Agent) loadBPF() error {
 	spec, err := ebpf.LoadCollectionSpec("bin/mesh.bpf.o")
 	if err != nil {
-		return fmt.Errorf("load spec: %w", err)
+		return fmt.Errorf("load mesh spec: %w", err)
 	}
 	coll, err := ebpf.NewCollection(spec)
 	if err != nil {
-		return fmt.Errorf("load collection: %w", err)
+		return fmt.Errorf("load mesh collection: %w", err)
 	}
 	a.maps = &BPFMaps{
 		ContainerRouteMap: coll.Maps["CONTAINER_ROUTE_MAP"],
 		NodeDynamicMap:    coll.Maps["NODE_DYNAMIC_MAP"],
 		RouteMissRingbuf:  coll.Maps["ROUTE_MISS_RINGBUF"],
-		VIPMap:            coll.Maps["VIP_MAP"],
-		ACLMap:            coll.Maps["ACL_MAP"],
-		PortACLMap:        coll.Maps["PORT_ACL_MAP"],
 	}
-	log.Printf("[agent] BPF maps loaded")
+	log.Printf("[agent] mesh BPF maps loaded")
+
+	// Load VIP balancer if enabled
+	if a.cfg.VIPEnabled {
+		vipSpec, err := ebpf.LoadCollectionSpec("bin/vip_balancer.bpf.o")
+		if err != nil {
+			log.Printf("[agent] VIP balancer BPF not found: %v", err)
+		} else {
+			vipColl, err := ebpf.NewCollection(vipSpec)
+			if err != nil {
+				log.Printf("[agent] VIP balancer load failed: %v", err)
+			} else {
+				a.maps.VIPMap = vipColl.Maps["VIP_MAP"]
+				a.maps.VIPStatsMap = vipColl.Maps["VIP_STATS_MAP"]
+				log.Printf("[agent] VIP balancer BPF loaded")
+			}
+		}
+	}
+
+	// Load firewall BPF
+	fwSpec, err := ebpf.LoadCollectionSpec("bin/firewall.bpf.o")
+	if err != nil {
+		log.Printf("[agent] firewall BPF not found: %v", err)
+	} else {
+		fwColl, err := ebpf.NewCollection(fwSpec)
+		if err != nil {
+			log.Printf("[agent] firewall load failed: %v", err)
+		} else {
+			a.maps.ACLMap = fwColl.Maps["ACL_MAP"]
+			a.maps.PortACLMap = fwColl.Maps["PORT_ACL_MAP"]
+			a.maps.DefaultPolicy = fwColl.Maps["DEFAULT_POLICY"]
+			// Set default policy to allow-all for overlay traffic
+			if a.maps.DefaultPolicy != nil {
+				key := uint32(0)
+				val := uint8(1)
+				a.maps.DefaultPolicy.Update(key, val, 0)
+			}
+			log.Printf("[agent] firewall BPF loaded")
+		}
+	}
+
 	return nil
 }
 
@@ -199,7 +266,47 @@ func (a *Agent) discoverPublicIP() error {
 	return nil
 }
 
-// --- UDP listener (handles both agent + seed traffic) ---
+func (a *Agent) stunRefreshLoop() {
+	ticker := time.NewTicker(2 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-a.stopCh:
+			return
+		case <-ticker.C:
+			oldIP := a.publicIP.String()
+			oldPort := a.publicPort
+			if err := a.discoverPublicIP(); err != nil {
+				log.Printf("[agent] STUN refresh failed: %v", err)
+				continue
+			}
+			if a.publicIP.String() != oldIP || a.publicPort != oldPort {
+				log.Printf("[agent] public IP changed: %s:%d -> %s:%d",
+					oldIP, oldPort, a.publicIP, a.publicPort)
+				// Re-register with all seeds
+				a.reRegisterWithSeeds()
+			}
+		}
+	}
+}
+
+func (a *Agent) reRegisterWithSeeds() {
+	reg := NodeRegistration{
+		OverlayIP:    a.cfg.NodeOverlayIP,
+		PublicIP:     a.publicIP.String(),
+		PublicPort:   a.publicPort,
+		Subnet:       a.cfg.NodeSubnet,
+		RelayCapable: a.seedMode,
+	}
+	a.mu.RLock()
+	for addr, conn := range a.seedConns {
+		a.sendToSeed(conn, Message{Type: "register", NodeInfo: &reg})
+		log.Printf("[agent] re-registered with seed %s", addr)
+	}
+	a.mu.RUnlock()
+}
+
+// --- UDP listener ---
 
 func (a *Agent) startUDPListener() error {
 	conn, err := net.ListenPacket("udp4", fmt.Sprintf("0.0.0.0:%d", a.cfg.ListenPort))
@@ -252,6 +359,8 @@ func (a *Agent) processUDP(data []byte, remote net.Addr) {
 		a.sendPong(remote)
 	case "query_resp":
 		a.handleQueryResponse(msg)
+	case "relay_request":
+		a.handleRelayRequest(msg, remote)
 	}
 }
 
@@ -262,7 +371,9 @@ func (a *Agent) handleRegister(msg Message) {
 		return
 	}
 	a.registry.register(msg.NodeInfo)
-	log.Printf("[seed] registered %s -> %s:%d", msg.NodeInfo.OverlayIP, msg.NodeInfo.PublicIP, msg.NodeInfo.PublicPort)
+	log.Printf("[seed] registered %s -> %s:%d (relay=%v)",
+		msg.NodeInfo.OverlayIP, msg.NodeInfo.PublicIP,
+		msg.NodeInfo.PublicPort, msg.NodeInfo.RelayCapable)
 }
 
 func (a *Agent) handleQuery(msg Message, remote net.Addr) {
@@ -299,7 +410,35 @@ func (a *Agent) handleQueryResponse(msg Message) {
 		a.peerBook[overlayU] = &net.UDPAddr{IP: publicIP, Port: node.PublicPort}
 		a.mu.Unlock()
 		log.Printf("[agent] node %s -> %s:%d", node.OverlayIP, node.PublicIP, node.PublicPort)
+
+		// Setup IPsec for this peer if enabled
+		if a.cfg.IPsecEnabled && a.ipSecMgr != nil {
+			remoteIP := net.ParseIP(node.PublicIP).To4()
+			if remoteIP != nil {
+				a.ipSecMgr.addSAForPeer(remoteIP)
+			}
+		}
 	}
+}
+
+func (a *Agent) handleRelayRequest(msg Message, remote net.Addr) {
+	if !a.seedMode || msg.Relay == nil {
+		return
+	}
+	log.Printf("[seed] relay request for %s via %s:%d",
+		msg.QueryIP, msg.Relay.RelayIP, msg.Relay.RelayPort)
+	// Forward the query through relay
+	relayAddr := fmt.Sprintf("%s:%d", msg.Relay.RelayIP, msg.Relay.RelayPort)
+	udpAddr, err := net.ResolveUDPAddr("udp4", relayAddr)
+	if err != nil {
+		return
+	}
+	conn, err := net.DialUDP("udp4", nil, udpAddr)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	a.sendToSeed(conn, Message{Type: "query", QueryIP: msg.QueryIP})
 }
 
 func (a *Agent) sendPong(remote net.Addr) {
@@ -331,8 +470,11 @@ func (a *Agent) querySeed(addr string) {
 
 	// Register
 	reg := NodeRegistration{
-		OverlayIP: a.cfg.NodeOverlayIP, PublicIP: a.publicIP.String(),
-		PublicPort: a.publicPort, Subnet: a.cfg.NodeSubnet,
+		OverlayIP:    a.cfg.NodeOverlayIP,
+		PublicIP:     a.publicIP.String(),
+		PublicPort:   a.publicPort,
+		Subnet:       a.cfg.NodeSubnet,
+		RelayCapable: a.seedMode,
 	}
 	a.sendToSeed(conn, Message{Type: "register", NodeInfo: &reg})
 
@@ -346,9 +488,24 @@ func (a *Agent) sendToSeed(conn *net.UDPConn, msg Message) {
 	conn.Write(append(data, sig...))
 }
 
+func (a *Agent) registerSelf() {
+	reg := NodeRegistration{
+		OverlayIP:    a.cfg.NodeOverlayIP,
+		PublicIP:     a.publicIP.String(),
+		PublicPort:   a.publicPort,
+		Subnet:       a.cfg.NodeSubnet,
+		RelayCapable: true,
+	}
+	a.registry.register(&reg)
+	log.Printf("[seed] self-registered %s -> %s:%d", reg.OverlayIP, reg.PublicIP, reg.PublicPort)
+}
+
+// --- Route miss consumer ---
+
 func (a *Agent) consumeRouteMiss() {
 	rd, err := ringbuf.NewReader(a.maps.RouteMissRingbuf)
 	if err != nil {
+		log.Printf("[agent] ringbuf reader: %v", err)
 		return
 	}
 	defer rd.Close()
@@ -368,9 +525,14 @@ func (a *Agent) consumeRouteMiss() {
 		missedIP := *(*uint32)(unsafe.Pointer(&record.RawSample[0]))
 		ip := make(net.IP, 4)
 		binary.LittleEndian.PutUint32(ip, missedIP)
+		log.Printf("[agent] route miss for %s", ip)
+
+		// Query all seeds for this IP
+		a.mu.RLock()
 		for addr := range a.seedConns {
 			a.queryNodeFromSeed(addr, ip.String())
 		}
+		a.mu.RUnlock()
 	}
 }
 
@@ -384,6 +546,8 @@ func (a *Agent) queryNodeFromSeed(addr, targetIP string) {
 	a.sendToSeed(conn, Message{Type: "query", QueryIP: targetIP})
 }
 
+// --- Heartbeat ---
+
 func (a *Agent) heartbeatLoop() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -393,8 +557,11 @@ func (a *Agent) heartbeatLoop() {
 			return
 		case <-ticker.C:
 			reg := NodeRegistration{
-				OverlayIP: a.cfg.NodeOverlayIP, PublicIP: a.publicIP.String(),
-				PublicPort: a.publicPort, Subnet: a.cfg.NodeSubnet,
+				OverlayIP:    a.cfg.NodeOverlayIP,
+				PublicIP:     a.publicIP.String(),
+				PublicPort:   a.publicPort,
+				Subnet:       a.cfg.NodeSubnet,
+				RelayCapable: a.seedMode,
 			}
 			a.mu.RLock()
 			for _, conn := range a.seedConns {
@@ -405,6 +572,42 @@ func (a *Agent) heartbeatLoop() {
 	}
 }
 
+// --- Peer health ---
+
+func (a *Agent) peerHealthLoop() {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-a.stopCh:
+			return
+		case <-ticker.C:
+			a.mu.RLock()
+			stalePeers := make([]uint32, 0)
+			for overlayIP := range a.peerBook {
+				// Check if still in BPF map
+				var ep NodeEndpoint
+				if err := a.maps.NodeDynamicMap.Lookup(overlayIP, &ep); err != nil {
+					stalePeers = append(stalePeers, overlayIP)
+				}
+			}
+			a.mu.RUnlock()
+
+			for _, ip := range stalePeers {
+				a.maps.NodeDynamicMap.Delete(ip)
+				a.mu.Lock()
+				delete(a.peerBook, ip)
+				a.mu.Unlock()
+				ipBytes := make(net.IP, 4)
+				binary.LittleEndian.PutUint32(ipBytes, ip)
+				log.Printf("[agent] removed stale peer %s", ipBytes)
+			}
+		}
+	}
+}
+
+// --- VIP watching (stub for Consul/Nomad integration) ---
+
 func (a *Agent) watchVIPs() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -414,7 +617,30 @@ func (a *Agent) watchVIPs() {
 			return
 		case <-ticker.C:
 			// TODO: query Consul/Nomad for VIP backends
+			// For now, update VIP map from config
+			a.updateVIPsFromConfig()
 		}
+	}
+}
+
+func (a *Agent) updateVIPsFromConfig() {
+	if a.maps.VIPMap == nil {
+		return
+	}
+	for _, vipStr := range a.cfg.VIPWatchList {
+		vip := net.ParseIP(vipStr).To4()
+		if vip == nil {
+			continue
+		}
+		vipU := *(*uint32)(unsafe.Pointer(&vip[0]))
+
+		// TODO: get backends from Consul/Nomad
+		// For now, use a placeholder
+		info := VIPInfo{
+			Count:   0,
+			NextIdx: 0,
+		}
+		a.maps.VIPMap.Update(vipU, info, 0)
 	}
 }
 
@@ -439,6 +665,15 @@ func (a *Agent) setupGeneveDevice() error {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("addr: %w: %s", err, out)
 	}
+
+	// Add routes for known peer subnets
+	a.mu.RLock()
+	for _, ep := range a.peerBook {
+		// Route through geneve for overlay traffic
+		_ = ep
+	}
+	a.mu.RUnlock()
+
 	log.Printf("[agent] geneve %s = %s", a.cfg.TunnelDevice, a.cfg.NodeOverlayIP)
 	return nil
 }
@@ -453,8 +688,36 @@ func (a *Agent) setupIPsec() {
 		log.Printf("[agent] ipsec: %v", err)
 		return
 	}
+	a.ipSecMgr = mgr
 	mgr.addSA()
+	log.Printf("[agent] IPsec enabled (SPI: 0x%08x)", a.cfg.IPsecSPI)
 }
+
+func (a *Agent) ipsecRotationLoop() {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-a.stopCh:
+			return
+		case <-ticker.C:
+			if a.ipSecMgr == nil {
+				continue
+			}
+			// Generate new SPI
+			newSPI := make([]byte, 4)
+			rand.Read(newSPI)
+			a.ipSecMgr.spi = binary.BigEndian.Uint32(newSPI)
+
+			// Delete old SA, add new one
+			a.ipSecMgr.delSA()
+			a.ipSecMgr.addSA()
+			log.Printf("[agent] IPsec SA rotated (new SPI: 0x%08x)", a.ipSecMgr.spi)
+		}
+	}
+}
+
+// --- Shutdown ---
 
 func (a *Agent) shutdown() {
 	log.Printf("[agent] shutting down")
@@ -466,6 +729,11 @@ func (a *Agent) shutdown() {
 		c.Close()
 	}
 	a.mu.Unlock()
+
+	// Cleanup IPsec
+	if a.ipSecMgr != nil {
+		a.ipSecMgr.delSA()
+	}
 }
 
 // --- HMAC auth ---

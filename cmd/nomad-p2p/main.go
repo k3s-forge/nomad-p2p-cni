@@ -25,7 +25,7 @@ func main() {
 	case "cni":
 		runCNI(os.Args[2:])
 	case "version":
-		fmt.Println("nomad-p2p v0.1.0")
+		fmt.Println("nomad-p2p v0.3.0")
 	case "help", "--help", "-h":
 		printUsage()
 	default:

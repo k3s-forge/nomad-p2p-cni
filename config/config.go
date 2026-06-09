@@ -3,8 +3,8 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"net"
+	"os"
 )
 
 type Config struct {
@@ -26,22 +26,38 @@ type Config struct {
 	StunServers []string `json:"stun_servers"`
 	ListenPort  int      `json:"listen_port"` // UDP listen port for P2P
 
+	// STUN refresh interval (seconds, default 120)
+	StunRefreshInterval int `json:"stun_refresh_interval"`
+
 	// IPsec (optional)
 	IPsecEnabled  bool   `json:"ipsec_enabled"`
 	IPsecSPI      uint32 `json:"ipsec_spi"`
 	IPsecKey      string `json:"ipsec_key"` // hex-encoded AES key
 
 	// CNI settings
-	CNIBinPath  string `json:"cni_bin_path"`
-	MTU         int    `json:"mtu"`
+	CNIBinPath string `json:"cni_bin_path"`
+	MTU        int    `json:"mtu"`
 
 	// VIP settings
 	VIPEnabled   bool     `json:"vip_enabled"`
 	VIPWatchList []string `json:"vip_watch_list"` // VIPs to watch
+
+	// Firewall ACL settings
+	FirewallEnabled bool          `json:"firewall_enabled"`
+	DefaultPolicy   string        `json:"default_policy"` // "allow" or "deny"
+	AllowedSources  []string      `json:"allowed_sources"` // IPs allowed to reach this node
+	AllowedPorts    []PortRule    `json:"allowed_ports"`   // port-level rules
 }
 
 type SeedConfig struct {
 	Addr string `json:"addr"` // IP:port or hostname
+}
+
+type PortRule struct {
+	SourceIP string `json:"source_ip"` // source IP
+	Port     int    `json:"port"`      // destination port
+	Protocol string `json:"protocol"`  // "tcp" or "udp"
+	Allow    bool   `json:"allow"`     // true=allow, false=deny
 }
 
 func Load(path string) (*Config, error) {
@@ -86,6 +102,12 @@ func (c *Config) Validate() error {
 	}
 	if len(c.StunServers) == 0 {
 		c.StunServers = []string{"stun.l.google.com:19302"}
+	}
+	if c.StunRefreshInterval == 0 {
+		c.StunRefreshInterval = 120
+	}
+	if c.DefaultPolicy == "" {
+		c.DefaultPolicy = "allow"
 	}
 	return nil
 }

@@ -13,11 +13,16 @@
     "stun1.l.google.com:19302"
   ],
   "listen_port": 9527,
+  "stun_refresh_interval": 120,
   "ipsec_enabled": false,
-  "ipsec_spi": 0x1000,
+  "ipsec_spi": 4096,
   "ipsec_key": "0123456789abcdef0123456789abcdef",
   "cni_bin_path": "/opt/cni/bin/nomad-p2p-cni",
   "mtu": 1420,
   "vip_enabled": false,
-  "vip_watch_list": []
+  "vip_watch_list": [],
+  "firewall_enabled": false,
+  "default_policy": "allow",
+  "allowed_sources": [],
+  "allowed_ports": []
 }

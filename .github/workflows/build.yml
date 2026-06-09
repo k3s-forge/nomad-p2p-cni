@@ -17,22 +17,38 @@ jobs:
         with:
           go-version: '1.22'
 
-      - name: Install dependencies
+      - name: Install BPF build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang llvm libbpf-dev linux-headers-$(uname -r)
+          sudo apt-get install -y \
+            clang \
+            llvm \
+            libbpf-dev \
+            linux-headers-generic \
+            libelf-dev \
+            zlib1g-dev
+
+      - name: Verify BPF headers
+        run: |
+          echo "=== Checking BPF headers ==="
+          ls -la /usr/include/bpf/ 2>/dev/null || echo "No /usr/include/bpf/"
+          dpkg -L libbpf-dev 2>/dev/null | head -20 || echo "libbpf-dev not found"
+          find /usr/include -name "bpf_helpers.h" 2>/dev/null || echo "bpf_helpers.h not found"
 
       - name: Build BPF programs
-        run: |
-          make build-bpf
+        run: make build-bpf
 
       - name: Build Go binaries
         run: |
-          make build-agent build-seed build-cni
+          make build-agent
+          make build-seed
+          make build-cni
 
       - name: Run go vet
-        run: |
-          go vet ./...
+        run: go vet ./...
+
+      - name: List built artifacts
+        run: ls -la bin/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -43,7 +59,7 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     permissions:
       contents: write
     steps:
@@ -54,10 +70,10 @@ jobs:
         with:
           go-version: '1.22'
 
-      - name: Install dependencies
+      - name: Install BPF build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang llvm libbpf-dev linux-headers-$(uname -r)
+          sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev
 
       - name: Build all
         run: make all
@@ -66,26 +82,17 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v0.1.0
-          name: v0.1.0 - Initial Release
+          name: v0.1.0
           body: |
-            ## eBPF P2P CNI for Nomad
+            eBPF P2P CNI for Nomad - Initial Release
             
-            ### Features
-            - Zero veth container networking via bpf_redirect_peer
-            - Geneve overlay tunnel with BPF map-driven routing
-            - STUN NAT traversal with UDP hole punching
+            Features:
+            - Zero veth container networking (bpf_redirect_peer)
+            - Geneve overlay tunnel
+            - STUN NAT traversal
             - Kernel IPsec encryption
-            - VIP load balancing (cgroup/connect4)
+            - VIP load balancing
             - TC ACL firewall
-            
-            ### Binaries
-            - `nomad-p2p-agent` - Per-node control plane daemon
-            - `nomad-p2p-seed` - Route registry server
-            - `nomad-p2p-cni` - CNI plugin binary
-            
-            ### Requirements
-            - Linux 5.10+
-            - clang/llvm
           files: |
             bin/*
           draft: false

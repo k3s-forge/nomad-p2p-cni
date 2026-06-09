@@ -1,12 +1,14 @@
-.PHONY: all build-agent build-seed build-cni clean
+.PHONY: all build-bpf build-agent build-seed build-cni clean
 
 CLANG ?= clang
 LLC ?= llc
 
 BPFTOOL ?= bpftool
-BPF_CFLAGS := -O2 -g -Wall -target bpf
 
-# Output
+# Detect libbpf headers location
+LIBBPF_HEADERS ?= $(shell dpkg -L libbpf-dev 2>/dev/null | grep include | head -1 || echo "/usr/include")
+BPF_CFLAGS := -O2 -g -Wall -target bpf -I$(LIBBPF_HEADERS)
+
 BIN_DIR := bin
 
 all: build-bpf build-agent build-seed build-cni
@@ -20,13 +22,13 @@ $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
 
 build-agent: build-bpf
-	go build -o $(BIN_DIR)/nomad-p2p-agent ./cmd/agent
+	CGO_ENABLED=0 go build -o $(BIN_DIR)/nomad-p2p-agent ./cmd/agent
 
 build-seed:
-	go build -o $(BIN_DIR)/nomad-p2p-seed ./cmd/seed
+	CGO_ENABLED=0 go build -o $(BIN_DIR)/nomad-p2p-seed ./cmd/seed
 
 build-cni:
-	go build -o $(BIN_DIR)/nomad-p2p-cni ./cmd/cni
+	CGO_ENABLED=0 go build -o $(BIN_DIR)/nomad-p2p-cni ./cmd/cni
 
 clean:
 	rm -rf $(BIN_DIR)

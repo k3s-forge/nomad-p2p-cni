@@ -1,11 +1,6 @@
-//go:build ignore
-
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/bpf.h>
-#include <linux/bpf.h>
-#include <linux/if_ether.h>
-#include <linux/ip.h>
 #include <bpf/bpf_helpers.h>
-#include <bpf/bpf_endian.h>
 
 #define MAX_BACKENDS 16
 
@@ -18,7 +13,7 @@ struct vip_info {
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, 256);
-    __type(key, __u32);           // VIP IP
+    __type(key, __u32);
     __type(value, struct vip_info);
 } VIP_MAP SEC(".maps");
 
@@ -28,15 +23,12 @@ int vip_load_balance(struct bpf_sock_addr *ctx) {
 
     struct vip_info *info = bpf_map_lookup_elem(&VIP_MAP, &vip);
     if (!info || info->count == 0)
-        return 1; // BPF_CGROUP_INET4_CONNECT: allow
+        return 1;
 
-    // Round-robin backend selection
     __u32 idx = __sync_fetch_and_add(&info->next_idx, 1) % info->count;
-    __u32 real_ip = info->backends[idx];
+    ctx->user_ip4 = info->backends[idx];
 
-    ctx->user_ip4 = real_ip;
-
-    return 1; // allow
+    return 1;
 }
 
 char _license[] SEC("license") = "GPL";

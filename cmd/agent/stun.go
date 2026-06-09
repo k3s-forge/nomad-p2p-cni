@@ -137,11 +137,11 @@ func parseMappedAddress(data []byte, attrType uint16, msgID []byte) (*STUNResult
 
 	if attrType == 0x0020 {
 		// XOR-MAPPED-ADDRESS: decode with magic cookie and txID
-		ip[0] ^= byte(stunMagicCookie >> 24)
-		ip[1] ^= byte(stunMagicCookie >> 16)
-		ip[2] ^= byte(stunMagicCookie >> 8)
-		ip[3] ^= byte(stunMagicCookie)
-		port ^= int(stunMagicCookie >> 16)
+		ip[0] ^= byte((stunMagicCookie >> 24) & 0xFF)
+		ip[1] ^= byte((stunMagicCookie >> 16) & 0xFF)
+		ip[2] ^= byte((stunMagicCookie >> 8) & 0xFF)
+		ip[3] ^= byte(stunMagicCookie & 0xFF)
+		port ^= int((stunMagicCookie >> 16) & 0xFFFF)
 	}
 
 	return &STUNResult{

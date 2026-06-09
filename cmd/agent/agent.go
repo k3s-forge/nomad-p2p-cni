@@ -30,7 +30,7 @@ type BPFMaps struct {
 type Agent struct {
 	cfg        *config.Config
 	maps       *BPFMaps
-	conn       *net.UDPConn
+	conn       net.PacketConn
 	publicIP   net.IP
 	publicPort int
 	seedConns  map[string]*net.UDPConn
@@ -128,7 +128,7 @@ func (a *Agent) loadBPF() error {
 		return fmt.Errorf("load BPF spec: %w", err)
 	}
 
-	coll, err := spec.Load(nil)
+	coll, err := ebpf.NewCollection(spec)
 	if err != nil {
 		return fmt.Errorf("load BPF collection: %w", err)
 	}

@@ -6,10 +6,7 @@ import (
 	"hash/fnv"
 	"log"
 	"net"
-	"os"
 	"os/exec"
-	"runtime"
-	"syscall"
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
@@ -49,7 +46,6 @@ func cmdAdd(args *skel.CmdArgs) error {
 		CNIVersion: netConf.CniVersion,
 		IPs: []*current.IPConfig{
 			{
-				Version: "4",
 				Address: net.IPNet{IP: podIP, Mask: net.CIDRMask(32, 32)},
 				Gateway: gateway,
 			},
@@ -103,50 +99,40 @@ func allocateIP(subnet, containerID string) (net.IP, net.IP, error) {
 	return ip, gateway, nil
 }
 
-func configureContainer(netns string, podIP string, gateway net.IP, mtu int) error {
+func configureContainer(netns string, podIP net.IP, gateway net.IP, mtu int) error {
 	if netns == "" {
 		return nil
 	}
 
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
-	_netns, err := os.Open("/var/run/netns/" + netns)
-	if err != nil {
-		return fmt.Errorf("open netns: %w", err)
-	}
-	defer _netns.Close()
-
-	// In the bpf_redirect_peer model, traffic is redirected at socket level
-	// We just need basic IP configuration for the container
 	ifName := "eth0"
 
-	// Use nsenter-style approach via setns
-	if err := setNetNs(_netns); err != nil {
-		return fmt.Errorf("set netns: %w", err)
+	// Use nsenter to configure the container's network namespace
+	nsenterArgs := []string{
+		"--net=/var/run/netns/" + netns,
+		"--",
+		"ip", "addr", "replace", podIP.String() + "/32", "dev", ifName,
 	}
-
-	cmd := exec.Command("ip", "addr", "replace", podIP+"/32", "dev", ifName)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 0, Gid: 0}}
+	cmd := exec.Command("nsenter", nsenterArgs...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("set IP: %w: %s", err, string(out))
 	}
 
-	cmd = exec.Command("ip", "link", "set", ifName, "mtu", fmt.Sprintf("%d", mtu), "up")
+	cmd = exec.Command("nsenter",
+		"--net=/var/run/netns/"+netns,
+		"--", "ip", "link", "set", ifName, "mtu",
+		fmt.Sprintf("%d", mtu), "up")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("set MTU: %w: %s", err, string(out))
 	}
 
-	cmd = exec.Command("ip", "route", "replace", "default", "via", gateway.String())
+	cmd = exec.Command("nsenter",
+		"--net=/var/run/netns/"+netns,
+		"--", "ip", "route", "replace", "default", "via", gateway.String())
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("add route: %w: %s", err, string(out))
 	}
 
 	return nil
-}
-
-func setNetNs(f *os.File) error {
-	return syscall.Setns(int(f.Fd()), syscall.CLONE_NEWNET)
 }
 
 func addContainerRoute(podIP net.IP, gateway net.IP) error {

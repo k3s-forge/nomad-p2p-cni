@@ -1,0 +1,15 @@
+{
+  "node_overlay_ip": "10.244.0.1",
+  "node_subnet": "10.244.1.0/24",
+  "seeds": [
+    {"addr": "127.0.0.1:9527"}
+  ],
+  "tunnel_vni": 100,
+  "tunnel_device": "gnv0",
+  "psk": "test-psk-key-for-ci-only",
+  "stun_servers": [],
+  "listen_port": 9527,
+  "ipsec_enabled": false,
+  "mtu": 1400,
+  "vip_enabled": false
+}

@@ -9,7 +9,6 @@ authors = { workspace = true }
 tokio = { workspace = true }
 futures = "0.3"
 aya = { workspace = true }
-aya-log = { workspace = true }
 libp2p = { workspace = true }
 notify = { workspace = true }
 serde = { workspace = true }

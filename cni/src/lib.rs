@@ -183,7 +183,7 @@ fn allocate_ip(container_id: &str) -> Ipv4Addr {
     let payload = serde_json::to_string(&body).unwrap_or_default();
     match ureq::post(&format!("{}/api/v1/container", AGENT_API))
         .set("Content-Type", "application/json")
-        .send_string(&payload)
+        .send(payload.as_bytes())
     {
         Ok(resp) => {
             if let Ok(body) = resp.into_string() {
@@ -212,9 +212,9 @@ fn notify_agent(action: &str, container_id: &str, ip: &str, iface: &str) -> Resu
         "iface": iface,
     });
     let payload = serde_json::to_string(&body).map_err(|e| format!("json: {}", e))?;
-    ureq::post(&format!("{}/api/v1/container", AGENT_API))
+    let _resp = ureq::post(&format!("{}/api/v1/container", AGENT_API))
         .set("Content-Type", "application/json")
-        .send_string(&payload)
+        .send(payload.as_bytes())
         .map_err(|e| format!("agent API error: {}", e))?;
     Ok(())
 }

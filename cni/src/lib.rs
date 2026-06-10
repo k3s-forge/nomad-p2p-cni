@@ -1,6 +1,5 @@
 use std::io::Read;
 use std::net::Ipv4Addr;
-use std::path::Path;
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
@@ -187,7 +186,8 @@ fn allocate_ip(container_id: &str) -> Ipv4Addr {
         .send_string(&payload)
     {
         Ok(resp) => {
-            if let Ok(json) = resp.into_json::<serde_json::Value>() {
+            if let Ok(body) = resp.into_string() {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
                 if let Some(ip_str) = json["ip"].as_str() {
                     if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
                         return ip;

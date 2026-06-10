@@ -93,12 +93,21 @@ async fn run_agent(config_path: &str, seed_mode: bool) -> Result<()> {
     let route_mgr = Arc::new(route::RouteManager::new());
     let container_mgr = api::ContainerManager::new();
 
+    let ipsec_mgr = if state.cfg.ipsec_enabled {
+        Some(Arc::new(std::sync::Mutex::new(ipsec::IpsecManager::new(
+            state.cfg.ipsec_spi,
+            &state.cfg.ipsec_key,
+        ))))
+    } else {
+        None
+    };
+
     let seed_addrs = state.cfg.seeds.iter().map(|s| s.addr.clone()).collect::<Vec<_>>();
     let p2p = kademlia::build_p2p(&state, &seed_addrs).await.ok();
 
     let stop = Arc::new(AtomicBool::new(false));
 
-    spawn_tasks(&state, &bpf, &proto, &seed_client, &route_mgr, container_mgr, p2p, &stop).await;
+    spawn_tasks(&state, &bpf, &proto, &seed_client, &route_mgr, container_mgr, ipsec_mgr, p2p, &stop).await;
 
     tokio::signal::ctrl_c().await.ok();
     tracing::info!("shutting down...");
@@ -115,6 +124,7 @@ async fn spawn_tasks(
     seed_client: &Arc<tokio::sync::Mutex<seed::SeedClient>>,
     route_mgr: &Arc<route::RouteManager>,
     container_mgr: api::ContainerManager,
+    ipsec_mgr: Option<Arc<std::sync::Mutex<ipsec::IpsecManager>>>,
     p2p: Option<kademlia::P2pNetwork>,
     stop: &Arc<AtomicBool>,
 ) {
@@ -128,7 +138,6 @@ async fn spawn_tasks(
         ));
     }
 
-    // CNI API server for container management
     tokio::spawn(api::api_server(
         container_mgr,
         bpf.clone(),
@@ -154,6 +163,14 @@ async fn spawn_tasks(
         route_mgr.clone(),
         stop.clone(),
     ));
+
+    if let Some(ipsec) = ipsec_mgr {
+        tokio::spawn(ipsec::ipsec_loop(
+            state.clone(),
+            ipsec,
+            stop.clone(),
+        ));
+    }
 
     if let Some(p2p) = p2p {
         tokio::spawn(kademlia::kademlia_loop(

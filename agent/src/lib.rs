@@ -1,5 +1,6 @@
 pub mod api;
 pub mod bpf;
+pub mod ipsec;
 pub mod kademlia;
 pub mod metrics;
 pub mod protocol;

@@ -23,6 +23,7 @@ nomad-p2p-common = { path = "../common" }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 rand = { workspace = true }
+hex = "0.4"
 
 [lib]
 name = "nomad_p2p_agent"

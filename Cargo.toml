@@ -20,7 +20,7 @@ tokio = { version = "1", features = ["full", "rt-multi-thread", "macros"] }
 
 # eBPF framework — uses unreleased aya features, requires git dependency
 # When aya 0.13 lands on crates.io, switch back to: aya = { version = "0.13", features = ["async_tokio"] }
-aya = { git = "https://github.com/aya-rs/aya", branch = "main" }
+aya = "0.12"
 
 # P2P networking
 libp2p = { version = "0.53", features = ["kad", "gossipsub", "tokio", "noise", "yamux", "dns", "identify", "ping", "tcp"] }

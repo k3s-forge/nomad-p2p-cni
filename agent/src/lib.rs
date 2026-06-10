@@ -1,7 +1,7 @@
 pub mod api;
 pub mod bpf;
 pub mod ipsec;
-pub mod kademlia;
+// pub mod kademlia;  // unstable: libp2p API mismatch, re-enable when deps stabilize
 pub mod metrics;
 pub mod protocol;
 pub mod relay;
@@ -11,6 +11,7 @@ pub mod seed;
 pub mod stun;
 pub mod vip;
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -128,7 +129,7 @@ pub struct AppContext {
     pub route_mgr: Arc<route::RouteManager>,
     pub container_mgr: api::ContainerManager,
     pub ipsec_mgr: Option<Arc<std::sync::Mutex<ipsec::IpsecManager>>>,
-    pub p2p: Option<kademlia::P2pNetwork>,
+    // pub p2p: Option<kademlia::P2pNetwork>,
     pub kad_tx: tokio::sync::mpsc::UnboundedSender<u32>,
     pub kad_rx: tokio::sync::mpsc::UnboundedReceiver<u32>,
     pub stop: Arc<std::sync::atomic::AtomicBool>,
@@ -186,9 +187,10 @@ impl AppContext {
             tokio::spawn(ipsec::ipsec_loop(state.clone(), ipsec, stop.clone()));
         }
 
-        if let Some(p2p) = self.p2p {
-            tokio::spawn(kademlia::kademlia_loop(state.clone(), p2p, self.kad_rx, stop.clone()));
-        }
+        // Unstable P2P Kademlia — re-enable when libp2p 0.54 API stabilized
+        // if let Some(p2p) = self.p2p {
+        //     tokio::spawn(kademlia::kademlia_loop(state.clone(), p2p, self.kad_rx, stop.clone()));
+        // }
 
         if state.cfg.read().await.vip_enabled {
             let monitor = Arc::new(vip::VipMonitor::new());

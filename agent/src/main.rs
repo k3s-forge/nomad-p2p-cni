@@ -101,10 +101,8 @@ async fn run_agent(config_path: &str, seed_mode: bool) -> Result<()> {
         None
     };
 
-    let seed_addrs = state.cfg.read().await.seeds.iter().map(|s| s.addr.clone()).collect::<Vec<_>>();
-    let p2p = kademlia::build_p2p(&state, &seed_addrs).await.ok();
-
-    let (kad_tx, kad_rx) = tokio::sync::mpsc::unbounded_channel();
+    let p2p: Option<bool> = None; // kademlia disabled (API needs stabilization)
+    let (kad_tx, kad_rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
     let stop = Arc::new(AtomicBool::new(false));
 
     let ctx = AppContext {

@@ -134,7 +134,8 @@ async fn handle_api_connection(
 
     let parts: Vec<&str> = request_line.split_whitespace().collect();
     if parts.len() < 3 {
-        send_response(reader.into_inner(), "400 Bad Request", "invalid request").await;
+        let response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 15\r\n\r\ninvalid request";
+        send_raw(reader.into_inner(), response).await;
         return;
     }
 
@@ -145,7 +146,8 @@ async fn handle_api_connection(
     let mut content_length = 0usize;
     loop {
         let mut header = String::new();
-        if reader.read_line(&mut header).await.ok() != Some(true) || header.trim().is_empty() {
+        let n = reader.read_line(&mut header).await.unwrap_or(0);
+        if n == 0 || header.trim().is_empty() {
             break;
         }
         if header.to_lowercase().starts_with("content-length:") {

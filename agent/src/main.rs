@@ -179,6 +179,16 @@ async fn spawn_tasks(
             stop.clone(),
         ));
     }
+
+    if state.cfg.vip_enabled {
+        let monitor = Arc::new(vip::VipMonitor::new());
+        tokio::spawn(vip::probe_loop(
+            state.clone(),
+            monitor,
+            bpf.clone(),
+            stop.clone(),
+        ));
+    }
 }
 
 async fn run_cni() -> Result<()> {

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"time"
+	"unsafe"
 
 	"github.com/cilium/ebpf/ringbuf"
 
@@ -23,6 +24,7 @@ const (
 
 type Message struct {
 	Type       string             `json:"type"`
+	QueryID    string             `json:"qid,omitempty"`
 	Timestamp  int64              `json:"ts"`
 	Nonce      string             `json:"nonce"`
 	NodeInfo   *NodeRegistration  `json:"node_info,omitempty"`
@@ -34,6 +36,14 @@ type Message struct {
 type RelayInfo struct {
 	RelayIP   string `json:"relay_ip"`
 	RelayPort int    `json:"relay_port"`
+}
+
+type PeerInfo struct {
+	Addr            *net.UDPAddr
+	RelayCapable    bool
+	NATType         NATType
+	PingOK          bool
+	PingLastSuccess time.Time
 }
 
 func (a *Agent) startUDPListener() error {
@@ -102,7 +112,9 @@ func (a *Agent) processUDP(data []byte, remote net.Addr) {
 	case "heartbeat":
 		a.handleRegister(msg)
 	case "ping":
-		a.sendPong(remote)
+		a.handlePing(msg, remote)
+	case "pong":
+		a.handlePong(msg)
 	case "query_resp":
 		a.handleQueryResponse(msg)
 	case "relay_request":
@@ -110,8 +122,52 @@ func (a *Agent) processUDP(data []byte, remote net.Addr) {
 	}
 }
 
-func (a *Agent) sendPong(remote net.Addr) {
-	a.sendMessage(Message{Type: "pong"}, remote)
+func (a *Agent) handlePing(msg Message, remote net.Addr) {
+	if msg.NodeInfo != nil {
+		a.handleRegister(msg)
+	}
+	a.sendMessage(Message{Type: "pong", NodeInfo: &NodeRegistration{
+		OverlayIP:    a.cfg.NodeOverlayIP,
+		PublicIP:     a.publicIP.String(),
+		PublicPort:   a.publicPort,
+		NATType:      string(a.natType),
+		RelayCapable: a.seedMode,
+	}}, remote)
+}
+
+func (a *Agent) handlePong(msg Message) {
+	if msg.NodeInfo == nil {
+		return
+	}
+	overlayIP := net.ParseIP(msg.NodeInfo.OverlayIP).To4()
+	publicIP := net.ParseIP(msg.NodeInfo.PublicIP).To4()
+	if overlayIP == nil || publicIP == nil {
+		return
+	}
+	overlayU := *(*uint32)(unsafe.Pointer(&overlayIP[0]))
+	publicU := *(*uint32)(unsafe.Pointer(&publicIP[0]))
+
+	ep := NodeEndpoint{PublicIP: publicU, PublicPort: uint16(msg.NodeInfo.PublicPort)}
+	a.maps.NodeDynamicMap.Update(overlayU, ep, 0)
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if peer, ok := a.peerBook[overlayU]; ok {
+		peer.PingOK = true
+		peer.PingLastSuccess = time.Now()
+		peer.NATType = NATType(msg.NodeInfo.NATType)
+		peer.Addr = &net.UDPAddr{IP: publicIP, Port: msg.NodeInfo.PublicPort}
+	} else {
+		a.peerBook[overlayU] = &PeerInfo{
+			Addr:            &net.UDPAddr{IP: publicIP, Port: msg.NodeInfo.PublicPort},
+			RelayCapable:    msg.NodeInfo.RelayCapable,
+			NATType:         NATType(msg.NodeInfo.NATType),
+			PingOK:          true,
+			PingLastSuccess: time.Now(),
+		}
+		a.metrics.setGauge("peers_total", float64(len(a.peerBook)))
+	}
+	log.Printf("[agent] pong from %s (nat=%s)", msg.NodeInfo.OverlayIP, msg.NodeInfo.NATType)
 }
 
 func (a *Agent) sendMessage(msg Message, remote net.Addr) {
@@ -169,6 +225,30 @@ func (a *Agent) consumeRouteMiss() {
 			a.queryNodeFromSeed(addr, missedIP.String())
 		}
 		a.mu.RUnlock()
+
+		if a.natType == NATSymmetric {
+			a.tryRelayForTarget(missedIP.String())
+		}
+	}
+}
+
+func (a *Agent) tryRelayForTarget(targetIP string) {
+	a.mu.RLock()
+	var relayPeer *NodeRegistration
+	for _, peer := range a.peerBook {
+		if peer.RelayCapable && peer.NATType != NATSymmetric {
+			relayPeer = &NodeRegistration{
+				PublicIP:     peer.Addr.IP.String(),
+				PublicPort:   peer.Addr.Port,
+				RelayCapable: true,
+			}
+			break
+		}
+	}
+	a.mu.RUnlock()
+
+	if relayPeer != nil {
+		a.sendRelayRequest(targetIP, relayPeer)
 	}
 }
 
@@ -180,4 +260,23 @@ func (a *Agent) queryNodeFromSeed(addr, targetIP string) {
 		return
 	}
 	a.sendToSeed(conn, Message{Type: "query", QueryIP: targetIP})
+}
+
+func (a *Agent) sendRelayRequest(targetIP string, relayPeer *NodeRegistration) {
+	if relayPeer == nil || !relayPeer.RelayCapable {
+		return
+	}
+	qid := fmt.Sprintf("%x-%d", time.Now().UnixNano(), a.publicPort)
+	a.mu.RLock()
+	for _, conn := range a.seedConns {
+		a.sendToSeed(conn, Message{
+			Type:       "relay_request",
+			QueryIP:    targetIP,
+			QueryID:    qid,
+			Relay:      &RelayInfo{RelayIP: relayPeer.PublicIP, RelayPort: relayPeer.PublicPort},
+		})
+		log.Printf("[agent] sent relay_request for %s via %s:%d (qid=%s)",
+			targetIP, relayPeer.PublicIP, relayPeer.PublicPort, qid)
+	}
+	a.mu.RUnlock()
 }

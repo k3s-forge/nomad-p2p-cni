@@ -73,6 +73,14 @@ func (a *Agent) reloadConfig() {
 		a.cfg.StunServers = newCfg.StunServers
 		log.Printf("[agent] STUN servers updated: %v", newCfg.StunServers)
 	}
+
+	if vipBackendsChanged(a.cfg.VIPBackends, newCfg.VIPBackends) {
+		a.cfg.VIPBackends = newCfg.VIPBackends
+		if a.cfg.VIPEnabled {
+			a.updateVIPsFromConfig()
+			log.Printf("[agent] VIP backends reloaded")
+		}
+	}
 }
 
 func stringSliceChanged(a, b []string) bool {
@@ -100,6 +108,21 @@ func portRulesChanged(a, b []config.PortRule) bool {
 			a[i].Port != b[i].Port ||
 			a[i].Protocol != b[i].Protocol ||
 			a[i].Allow != b[i].Allow {
+			return true
+		}
+	}
+	return false
+}
+
+func vipBackendsChanged(a, b []config.VIPBackend) bool {
+	if len(a) != len(b) {
+		return true
+	}
+	for i := range a {
+		if a[i].VIP != b[i].VIP {
+			return true
+		}
+		if stringSliceChanged(a[i].Backends, b[i].Backends) {
 			return true
 		}
 	}

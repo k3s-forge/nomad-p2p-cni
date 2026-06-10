@@ -18,6 +18,14 @@ import (
 	"github.com/nomad-p2p-cni/config"
 )
 
+type NATType string
+
+const (
+	NATUnknown    NATType = "unknown"
+	NATEasy       NATType = "easy"
+	NATSymmetric  NATType = "symmetric"
+)
+
 type Agent struct {
 	cfg        *config.Config
 	configPath string
@@ -28,8 +36,9 @@ type Agent struct {
 	conn       net.PacketConn
 	publicIP   net.IP
 	publicPort int
+	natType    NATType
 	seedConns map[string]*net.UDPConn
-	peerBook   map[uint32]*net.UDPAddr
+	peerBook   map[uint32]*PeerInfo
 	mu         sync.RWMutex
 	stopCh     chan struct{}
 	seedMode   bool
@@ -49,13 +58,14 @@ func newAgent(cfg *config.Config, configPath string, seedMode bool) (*Agent, err
 		cfg:        cfg,
 		configPath: configPath,
 		seedConns: make(map[string]*net.UDPConn),
-		peerBook:   make(map[uint32]*net.UDPAddr),
+		peerBook:   make(map[uint32]*PeerInfo),
 		stopCh:     make(chan struct{}),
 		seedMode:   seedMode,
 		registry:   newSeedRegistry(),
 		geneveDev:  cfg.TunnelDevice,
 		startTime:  time.Now(),
 		metrics:    newMetricsCollector(),
+		natType:    NATUnknown,
 	}, nil
 }
 
@@ -91,6 +101,7 @@ func (a *Agent) run() error {
 	go a.heartbeatLoop()
 	go a.stunRefreshLoop()
 	go a.peerHealthLoop()
+	go a.peerPingLoop()
 
 	if a.cfg.VIPEnabled {
 		if a.cfg.ConsulAddr != "" {

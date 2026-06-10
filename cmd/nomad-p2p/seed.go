@@ -19,6 +19,10 @@ type seedRegistry struct {
 	mu       sync.RWMutex
 	nonces   map[string]time.Time
 	nonceMu  sync.Mutex
+
+	// Relay tracking: queryID -> original requester addr
+	relayPending map[string]*net.UDPAddr
+	relayMu      sync.Mutex
 }
 
 type seedEntry struct {
@@ -32,12 +36,14 @@ type NodeRegistration struct {
 	PublicPort   int    `json:"public_port"`
 	Subnet       string `json:"subnet"`
 	RelayCapable bool   `json:"relay_capable"`
+	NATType      string `json:"nat_type"`
 }
 
 func newSeedRegistry() *seedRegistry {
 	return &seedRegistry{
-		table:  make(map[string]*seedEntry),
-		nonces: make(map[string]time.Time),
+		table:       make(map[string]*seedEntry),
+		nonces:      make(map[string]time.Time),
+		relayPending: make(map[string]*net.UDPAddr),
 	}
 }
 
@@ -102,9 +108,9 @@ func (a *Agent) handleRegister(msg Message) {
 	}
 	a.registry.register(msg.NodeInfo)
 	a.metrics.inc("seed_registrations")
-	log.Printf("[seed] registered %s -> %s:%d (relay=%v)",
+	log.Printf("[seed] registered %s -> %s:%d (relay=%v, nat=%s)",
 		msg.NodeInfo.OverlayIP, msg.NodeInfo.PublicIP,
-		msg.NodeInfo.PublicPort, msg.NodeInfo.RelayCapable)
+		msg.NodeInfo.PublicPort, msg.NodeInfo.RelayCapable, msg.NodeInfo.NATType)
 }
 
 func (a *Agent) handleQuery(msg Message, remote net.Addr) {
@@ -120,6 +126,21 @@ func (a *Agent) handleQuery(msg Message, remote net.Addr) {
 }
 
 func (a *Agent) handleQueryResponse(msg Message) {
+	// Check if this is a relayed response
+	if msg.QueryID != "" {
+		a.registry.relayMu.Lock()
+		origAddr, ok := a.registry.relayPending[msg.QueryID]
+		if ok {
+			delete(a.registry.relayPending, msg.QueryID)
+		}
+		a.registry.relayMu.Unlock()
+		if ok {
+			log.Printf("[seed] relaying response for qid=%s to %s", msg.QueryID, origAddr)
+			a.sendMessage(Message{Type: "query_resp", Nodes: msg.Nodes, QueryID: msg.QueryID}, origAddr)
+			return
+		}
+	}
+
 	for _, node := range msg.Nodes {
 		overlayIP := net.ParseIP(node.OverlayIP).To4()
 		publicIP := net.ParseIP(node.PublicIP).To4()
@@ -133,10 +154,15 @@ func (a *Agent) handleQueryResponse(msg Message) {
 		a.maps.NodeDynamicMap.Update(overlayU, ep, 0)
 
 		a.mu.Lock()
-		a.peerBook[overlayU] = &net.UDPAddr{IP: publicIP, Port: node.PublicPort}
+		a.peerBook[overlayU] = &PeerInfo{
+			Addr:         &net.UDPAddr{IP: publicIP, Port: node.PublicPort},
+			RelayCapable: node.RelayCapable,
+			NATType:      NATType(node.NATType),
+		}
 		a.mu.Unlock()
 		a.metrics.setGauge("peers_total", float64(len(a.peerBook)))
-		log.Printf("[agent] node %s -> %s:%d", node.OverlayIP, node.PublicIP, node.PublicPort)
+		log.Printf("[agent] node %s -> %s:%d (nat=%s, relay=%v)",
+			node.OverlayIP, node.PublicIP, node.PublicPort, node.NATType, node.RelayCapable)
 
 		if a.cfg.IPsecEnabled && a.ipSecMgr != nil {
 			remoteIP := net.ParseIP(node.PublicIP).To4()
@@ -148,22 +174,33 @@ func (a *Agent) handleQueryResponse(msg Message) {
 }
 
 func (a *Agent) handleRelayRequest(msg Message, remote net.Addr) {
-	if !a.seedMode || msg.Relay == nil {
+	if !a.seedMode || msg.Relay == nil || msg.QueryID == "" {
 		return
 	}
-	log.Printf("[seed] relay request for %s via %s:%d",
-		msg.QueryIP, msg.Relay.RelayIP, msg.Relay.RelayPort)
+	log.Printf("[seed] relay request for %s via %s:%d (qid=%s)",
+		msg.QueryIP, msg.Relay.RelayIP, msg.Relay.RelayPort, msg.QueryID)
+
+	a.registry.relayMu.Lock()
+	a.registry.relayPending[msg.QueryID] = remote.(*net.UDPAddr)
+	a.registry.relayMu.Unlock()
+
 	relayAddr := fmt.Sprintf("%s:%d", msg.Relay.RelayIP, msg.Relay.RelayPort)
 	udpAddr, err := net.ResolveUDPAddr("udp4", relayAddr)
 	if err != nil {
+		a.registry.relayMu.Lock()
+		delete(a.registry.relayPending, msg.QueryID)
+		a.registry.relayMu.Unlock()
 		return
 	}
 	conn, err := net.DialUDP("udp4", nil, udpAddr)
 	if err != nil {
+		a.registry.relayMu.Lock()
+		delete(a.registry.relayPending, msg.QueryID)
+		a.registry.relayMu.Unlock()
 		return
 	}
 	defer conn.Close()
-	a.sendToSeed(conn, Message{Type: "query", QueryIP: msg.QueryIP})
+	a.sendToSeed(conn, Message{Type: "query", QueryIP: msg.QueryIP, QueryID: msg.QueryID})
 }
 
 func (a *Agent) bootstrapFromSeeds() {
@@ -191,6 +228,7 @@ func (a *Agent) querySeed(addr string) {
 		PublicPort:   a.publicPort,
 		Subnet:       a.cfg.NodeSubnet,
 		RelayCapable: a.seedMode,
+		NATType:      string(a.natType),
 	}
 	a.sendToSeed(conn, Message{Type: "register", NodeInfo: &reg})
 	a.sendToSeed(conn, Message{Type: "query"})
@@ -203,9 +241,10 @@ func (a *Agent) registerSelf() {
 		PublicPort:   a.publicPort,
 		Subnet:       a.cfg.NodeSubnet,
 		RelayCapable: true,
+		NATType:      string(a.natType),
 	}
 	a.registry.register(&reg)
-	log.Printf("[seed] self-registered %s -> %s:%d", reg.OverlayIP, reg.PublicIP, reg.PublicPort)
+	log.Printf("[seed] self-registered %s -> %s:%d (nat=%s)", reg.OverlayIP, reg.PublicIP, reg.PublicPort, reg.NATType)
 }
 
 func (a *Agent) heartbeatLoop() {
@@ -222,6 +261,7 @@ func (a *Agent) heartbeatLoop() {
 				PublicPort:   a.publicPort,
 				Subnet:       a.cfg.NodeSubnet,
 				RelayCapable: a.seedMode,
+				NATType:      string(a.natType),
 			}
 			a.mu.RLock()
 			for _, conn := range a.seedConns {
@@ -244,10 +284,14 @@ func (a *Agent) peerHealthLoop() {
 
 			a.mu.RLock()
 			stalePeers := make([]uint32, 0)
-			for overlayIP := range a.peerBook {
+			for overlayIP, peer := range a.peerBook {
 				var ep NodeEndpoint
 				if err := a.maps.NodeDynamicMap.Lookup(overlayIP, &ep); err != nil {
 					stalePeers = append(stalePeers, overlayIP)
+					continue
+				}
+				if time.Since(peer.PingLastSuccess) > 3*time.Minute {
+					go a.pingPeer(overlayIP, peer)
 				}
 			}
 			a.mu.RUnlock()
@@ -262,6 +306,39 @@ func (a *Agent) peerHealthLoop() {
 				log.Printf("[agent] removed stale peer %s", ipBytes)
 			}
 			a.metrics.setGauge("peers_total", float64(len(a.peerBook)))
+		}
+	}
+}
+
+func (a *Agent) pingPeer(overlayIP uint32, peer *PeerInfo) {
+	reg := NodeRegistration{
+		OverlayIP:    a.cfg.NodeOverlayIP,
+		PublicIP:     a.publicIP.String(),
+		PublicPort:   a.publicPort,
+		Subnet:       a.cfg.NodeSubnet,
+		RelayCapable: a.seedMode,
+		NATType:      string(a.natType),
+	}
+	a.sendMessage(Message{Type: "ping", NodeInfo: &reg}, peer.Addr)
+}
+
+func (a *Agent) pingAllPeers() {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	for overlayIP, peer := range a.peerBook {
+		go a.pingPeer(overlayIP, peer)
+	}
+}
+
+func (a *Agent) peerPingLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-a.stopCh:
+			return
+		case <-ticker.C:
+			a.pingAllPeers()
 		}
 	}
 }

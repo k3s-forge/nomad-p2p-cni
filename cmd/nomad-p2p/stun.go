@@ -64,6 +64,73 @@ func (c *stunClient) query(addr string) (*stunResult, error) {
 	return parseSTUNResp(buf[:n], txID)
 }
 
+func (c *stunClient) queryFromConn(conn *net.UDPConn, addr string) (*stunResult, error) {
+	udpAddr, err := net.ResolveUDPAddr("udp4", addr)
+	if err != nil {
+		return nil, err
+	}
+
+	txID := make([]byte, 12)
+	for i := range txID {
+		txID[i] = byte(i + 2)
+	}
+
+	req := make([]byte, 20)
+	binary.BigEndian.PutUint16(req[0:2], 0x0001)
+	binary.BigEndian.PutUint32(req[4:8], stunMagicCookie)
+	copy(req[8:20], txID)
+
+	conn.SetWriteDeadline(time.Now().Add(c.timeout))
+	if _, err := conn.WriteTo(req, udpAddr); err != nil {
+		return nil, err
+	}
+
+	conn.SetReadDeadline(time.Now().Add(c.timeout))
+	buf := make([]byte, 1024)
+	n, _, err := conn.ReadFrom(buf)
+	if err != nil {
+		return nil, err
+	}
+	return parseSTUNResp(buf[:n], txID)
+}
+
+func detectNATType(servers []string, timeout time.Duration) NATType {
+	if len(servers) < 2 {
+		log.Printf("[stun] need at least 2 STUN servers for NAT detection, have %d", len(servers))
+		return NATUnknown
+	}
+
+	localAddr, err := net.ResolveUDPAddr("udp4", "0.0.0.0:0")
+	if err != nil {
+		return NATUnknown
+	}
+	conn, err := net.ListenUDP("udp4", localAddr)
+	if err != nil {
+		return NATUnknown
+	}
+	defer conn.Close()
+
+	first, err := (&stunClient{timeout: timeout}).queryFromConn(conn, servers[0])
+	if err != nil {
+		log.Printf("[stun] NAT detection: first server failed: %v", err)
+		return NATUnknown
+	}
+
+	second, err := (&stunClient{timeout: timeout}).queryFromConn(conn, servers[1])
+	if err != nil {
+		log.Printf("[stun] NAT detection: second server failed: %v", err)
+		return NATUnknown
+	}
+
+	if first.PublicPort != second.PublicPort {
+		log.Printf("[stun] symmetric NAT detected: port %d vs %d", first.PublicPort, second.PublicPort)
+		return NATSymmetric
+	}
+
+	log.Printf("[stun] easy NAT (port-consistent): %d", first.PublicPort)
+	return NATEasy
+}
+
 func parseSTUNResp(data []byte, txID []byte) (*stunResult, error) {
 	if len(data) < 20 {
 		return nil, fmt.Errorf("too short")
@@ -119,6 +186,10 @@ func (a *Agent) discoverPublicIP() error {
 	}
 	a.publicIP = r.PublicIP
 	a.publicPort = r.PublicPort
+
+	a.natType = detectNATType(a.cfg.StunServers, 3*time.Second)
+	log.Printf("[agent] NAT type: %s", a.natType)
+
 	return nil
 }
 
@@ -154,6 +225,7 @@ func (a *Agent) reRegisterWithSeeds() {
 		PublicPort:   a.publicPort,
 		Subnet:       a.cfg.NodeSubnet,
 		RelayCapable: a.seedMode,
+		NATType:      string(a.natType),
 	}
 	a.mu.RLock()
 	for addr, conn := range a.seedConns {

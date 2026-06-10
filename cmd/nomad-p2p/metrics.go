@@ -60,6 +60,17 @@ func (a *Agent) startMetricsServer() {
 		fmt.Fprintf(w, "# TYPE nomad_p2p_uptime_seconds gauge\n")
 		fmt.Fprintf(w, "nomad_p2p_uptime_seconds %.0f\n\n", time.Since(a.startTime).Seconds())
 
+		fmt.Fprintf(w, "# HELP nomad_p2p_nat_type NAT type (0=unknown, 1=easy, 2=symmetric)\n")
+		fmt.Fprintf(w, "# TYPE nomad_p2p_nat_type gauge\n")
+		natVal := 0
+		switch a.natType {
+		case NATEasy:
+			natVal = 1
+		case NATSymmetric:
+			natVal = 2
+		}
+		fmt.Fprintf(w, "nomad_p2p_nat_type %d\n\n", natVal)
+
 		fmt.Fprintf(w, "# HELP nomad_p2p_peers_total Current number of known peers\n")
 		fmt.Fprintf(w, "# TYPE nomad_p2p_peers_total gauge\n")
 		a.mu.RLock()
@@ -85,14 +96,15 @@ func (a *Agent) startMetricsServer() {
 		peerCount := len(a.peerBook)
 		a.mu.RUnlock()
 
-		status := map[string]interface{}{
-			"status":  "ok",
-			"version": "v0.3.0",
-			"uptime":  time.Since(a.startTime).String(),
-			"peers":   peerCount,
-			"overlay": a.cfg.NodeOverlayIP,
-			"public":  fmt.Sprintf("%s:%d", a.publicIP, a.publicPort),
-		}
+status := map[string]interface{}{
+		"status":   "ok",
+		"version":  "v0.3.0",
+		"uptime":   time.Since(a.startTime).String(),
+		"peers":    peerCount,
+		"overlay":  a.cfg.NodeOverlayIP,
+		"public":   fmt.Sprintf("%s:%d", a.publicIP, a.publicPort),
+		"nat_type": string(a.natType),
+	}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(status)
 	})

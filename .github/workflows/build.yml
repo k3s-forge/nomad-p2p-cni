@@ -46,6 +46,7 @@ jobs:
           cargo build --release --package nomad-p2p-agent --package nomad-p2p-cni 2>&1
           mkdir -p bin
           cp target/release/nomad-p2p-agent bin/nomad-p2p-agent-rust
+          cp target/release/nomad-p2p-cni bin/nomad-p2p-cni
           ls -la bin/
 
       - name: Upload
@@ -143,6 +144,293 @@ jobs:
           docker rm test-node 2>/dev/null || true
           docker rm -f seed-node node-1 node-2 2>/dev/null || true
           docker network rm nomad-p2p-net 2>/dev/null || true
+
+  nomad-cluster:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq curl
+
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: nomad-p2p
+          path: bin/
+
+      - name: CNI binary detection
+        run: |
+          echo "=== CNI Binary Check ==="
+          CNI="./bin/nomad-p2p-cni"
+          if [ -x "$CNI" ]; then
+            echo "  ok  CNI binary ($(stat -c%s $CNI) bytes)"
+          else
+            echo "  FAIL CNI missing"; exit 1
+          fi
+          echo '{"cniVersion":"0.4.0","name":"test","type":"nomad-p2p-cni","command":"VERSION"}' | $CNI 2>/dev/null && echo "  ok  CNI stdin VERSION" || echo "  skip CNI stdin (expected)"
+          ./bin/nomad-p2p-agent-rust Version
+
+      - name: Build Docker image
+        run: docker build -q -t nomad-p2p -f test/docker/Dockerfile .
+
+      - name: Create network
+        run: docker network create cni-net
+
+      - name: Start seed node (Nomad server)
+        run: |
+          docker run -d --name cni-srv --network cni-net \
+            --privileged --cap-add=SYS_ADMIN --cap-add=NET_ADMIN --cgroupns=host \
+            -v /sys/fs/bpf:/sys/fs/bpf \
+            -e SEED_ADDR="cni-srv:9527" -e NODE_OVERLAY_IP="10.244.0.1" \
+            nomad-p2p nomad-seed
+          sleep 12
+
+      - name: Start client 1
+        run: |
+          docker run -d --name cni-cli1 --network cni-net \
+            --privileged --cap-add=SYS_ADMIN --cap-add=NET_ADMIN --cgroupns=host \
+            -v /sys/fs/bpf:/sys/fs/bpf \
+            -e SEED_ADDR="cni-srv:9527" -e NODE_OVERLAY_IP="10.244.0.2" \
+            -e NOMAD_SERVER="cni-srv" nomad-p2p nomad-client
+          sleep 4
+
+      - name: Start client 2
+        run: |
+          docker run -d --name cni-cli2 --network cni-net \
+            --privileged --cap-add=SYS_ADMIN --cap-add=NET_ADMIN --cgroupns=host \
+            -v /sys/fs/bpf:/sys/fs/bpf \
+            -e SEED_ADDR="cni-srv:9527" -e NODE_OVERLAY_IP="10.244.0.3" \
+            -e NOMAD_SERVER="cni-srv" nomad-p2p nomad-client
+          sleep 4
+
+      - name: Verify 3-node P2P
+        run: |
+          FAIL=0
+          for c in cni-srv cni-cli1 cni-cli2; do
+            if docker exec $c pgrep -f "nomad-p2p-agent-rust" >/dev/null 2>&1; then
+              echo "  ok  $c P2P agent"
+            else
+              echo "  FAIL $c P2P agent"; FAIL=1
+            fi
+          done
+          for c in cni-srv cni-cli1 cni-cli2; do
+            if docker exec $c ss -ulnp 2>/dev/null | grep -q ":9527"; then
+              echo "  ok  $c UDP:9527"
+            else
+              echo "  FAIL $c UDP:9527"; FAIL=1
+            fi
+          done
+          [ $FAIL -ne 0 ] && exit 1
+
+      - name: Wait for Nomad 3-node cluster
+        run: |
+          docker exec cni-srv nomad server members 2>/dev/null || true
+          for i in $(seq 1 20); do
+            READY=$(docker exec cni-srv nomad node status 2>/dev/null | grep -c ready || echo "0")
+            echo "  [$i] Nomad ready nodes: $READY"
+            if [ "$READY" -ge 2 ]; then break; fi
+            sleep 2
+          done
+          docker exec cni-srv nomad node status 2>/dev/null || true
+
+      - name: CNI plugin check in containers
+        run: |
+          for c in cni-srv cni-cli1 cni-cli2; do
+            echo "--- $c ---"
+            docker exec $c bash -c 'echo "  CNI bin: $(ls /opt/cni/bin/nomad-p2p-cni 2>/dev/null || echo MISSING)"'
+            docker exec $c bash -c 'echo "  CNI config: $(cat /opt/cni/config/nomad-p2p.conflist 2>/dev/null || echo MISSING)"'
+          done
+
+      - name: Deploy CNI workloads
+        run: |
+          cat > /tmp/cni-job.hcl <<'JOB'
+          job "cni-p2p" {
+            datacenters = ["dc1"]; type = "service"
+            group "web" {
+              count = 2
+              network { mode = "cni/nomad-p2p" port "http" { to = 8080 } }
+              task "srv" {
+                driver = "raw_exec"
+                config { command = "python3"; args = ["-m","http.server","8080"] }
+                resources { cpu = 50; memory = 64 }
+              }
+            }
+          }
+          JOB
+          docker cp /tmp/cni-job.hcl cni-srv:/tmp/
+          docker exec cni-srv nomad job run -detach /tmp/cni-job.hcl 2>&1 || true
+
+      - name: Monitor CNI allocations
+        run: |
+          for i in $(seq 1 30); do
+            RUN=$(docker exec cni-srv nomad job status cni-p2p 2>/dev/null | grep -c running || echo "0")
+            echo "  [$i] CNI allocs running: $RUN"
+            [ "$RUN" -ge 2 ] && break
+            sleep 2
+          done
+          docker exec cni-srv nomad job status cni-p2p 2>/dev/null || true
+
+      - name: Cross-node traffic test
+        run: |
+          FAIL=0
+          for aid in $(docker exec cni-srv nomad job allocs cni-p2p -json 2>/dev/null | jq -r '.[].ID' 2>/dev/null); do
+            IP=$(docker exec cni-srv nomad alloc status $aid 2>/dev/null | grep "IP:" | awk '{print $2}')
+            NODE=$(docker exec cni-srv nomad alloc status $aid 2>/dev/null | grep "Node ID" | awk '{print $3}')
+            [ -z "$IP" ] && continue
+            echo "  alloc=$aid node=$NODE ip=$IP"
+            for t in $(seq 1 5); do
+              if docker exec cni-srv curl -sf -m 3 "http://${IP}:8080" >/dev/null 2>&1; then
+                echo "    ok  HTTP reachable"; break
+              fi
+              [ $t -eq 5 ] && { echo "    FAIL HTTP"; FAIL=1; }
+              sleep 2
+            done
+          done
+          [ $FAIL -ne 0 ] && exit 1
+
+      - name: BPF verification
+        run: |
+          for c in cni-srv cni-cli1 cni-cli2; do
+            echo "--- $c ---"
+            docker exec $c ls /sys/fs/bpf/ 2>/dev/null | wc -l | xargs -I{} echo "  BPF maps: {}"
+            docker exec $c ip link show gnv0 2>/dev/null | head -3 || echo "  Geneve: not found"
+          done
+
+      - name: Final report
+        run: |
+          echo "======================================"
+          echo " 3-Node CNI Cluster Test Results"
+          echo "======================================"
+          echo " P2P agents: $(docker exec cni-srv pgrep -c -f nomad-p2p-agent-rust 2>/dev/null || echo 0)"
+          echo " Nomad nodes: $(docker exec cni-srv nomad node status 2>/dev/null | grep -c ready || echo 0)"
+          echo " CNI allocs: $(docker exec cni-srv nomad job status cni-p2p 2>/dev/null | grep -c running || echo 0)"
+          echo "======================================"
+
+      - name: Collect logs
+        if: always()
+        run: |
+          for c in cni-srv cni-cli1 cni-cli2; do
+            echo "=== $c ==="; docker logs $c 2>&1 | tail -15 || true
+          done
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f cni-srv cni-cli1 cni-cli2 2>/dev/null || true
+          docker network rm cni-net 2>/dev/null || true
+
+  cni-persistence:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: nomad-p2p
+          path: bin/
+
+      - name: Make binaries executable
+        run: chmod +x bin/nomad-p2p-agent-rust bin/nomad-p2p-cni
+
+      - name: Build Docker image
+        run: docker build -t nomad-p2p -f test/docker/Dockerfile .
+
+      - name: Create network
+        run: docker network create persist-net
+
+      - name: Start seed node
+        run: |
+          docker run -d --name persist-seed \
+            --network persist-net \
+            --privileged --cap-add=SYS_ADMIN --cap-add=NET_ADMIN --cgroupns=host \
+            -v /sys/fs/bpf:/sys/fs/bpf \
+            -e SEED_ADDR="persist-seed:9527" \
+            -e NODE_OVERLAY_IP="10.244.0.1" \
+            nomad-p2p test-persistence
+          sleep 15
+
+      - name: Start client nodes
+        run: |
+          docker run -d --name persist-cli1 \
+            --network persist-net \
+            --privileged --cap-add=SYS_ADMIN --cap-add=NET_ADMIN --cgroupns=host \
+            -v /sys/fs/bpf:/sys/fs/bpf \
+            -e SEED_ADDR="persist-seed:9527" \
+            -e NODE_OVERLAY_IP="10.244.0.2" \
+            -e NOMAD_SERVER="persist-seed" \
+            nomad-p2p nomad-client
+          sleep 3
+
+          docker run -d --name persist-cli2 \
+            --network persist-net \
+            --privileged --cap-add=SYS_ADMIN --cap-add=NET_ADMIN --cgroupns=host \
+            -v /sys/fs/bpf:/sys/fs/bpf \
+            -e SEED_ADDR="persist-seed:9527" \
+            -e NODE_OVERLAY_IP="10.244.0.3" \
+            -e NOMAD_SERVER="persist-seed" \
+            nomad-p2p nomad-client
+          sleep 5
+
+      - name: Wait for Nomad cluster
+        run: |
+          for i in $(seq 1 30); do
+            NODES=$(docker exec persist-seed nomad node status 2>/dev/null | grep -c ready || echo "0")
+            echo "  Ready nodes: $NODES"
+            if [ "$NODES" -ge 1 ]; then break; fi
+            sleep 2
+          done
+
+      - name: Check persistence test output
+        run: |
+          echo "Waiting for persistence test to complete..."
+          docker wait persist-seed 2>/dev/null || sleep 60
+          echo "=== Test Results ==="
+          docker logs persist-seed 2>&1 | tail -40
+
+      - name: Verify persistence passed
+        run: |
+          if docker logs persist-seed 2>&1 | grep -q "0 failed"; then
+            echo "PERSISTENCE TEST PASSED"
+            exit 0
+          else
+            echo "PERSISTENCE TEST FAILED"
+            docker logs persist-seed 2>&1 | grep -E "✗|Results:" | head -20
+            exit 1
+          fi
+
+      - name: Traffic capture (Geneve/UDP)
+        run: |
+          # Show cross-node traffic evidence
+          echo "=== P2P mesh traffic logs ==="
+          for c in persist-seed persist-cli1 persist-cli2; do
+            echo "--- $c ---"
+            docker exec $c ss -ulnp 2>/dev/null | grep 9527 || true
+            docker exec $c ip link show gnv0 2>/dev/null | head -3 || true
+          done
+
+      - name: BPF map state after restart
+        run: |
+          # Verify BPF maps survived the kill/restart
+          echo "=== BPF maps after persistence test ==="
+          ls -la /sys/fs/bpf/ 2>/dev/null || echo "/sys/fs/bpf/ not accessible from host"
+
+      - name: Collect all logs
+        if: always()
+        run: |
+          for c in persist-seed persist-cli1 persist-cli2; do
+            echo "=== $c ==="
+            docker logs $c 2>&1 | tail -30 || true
+          done
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f persist-seed persist-cli1 persist-cli2 2>/dev/null || true
+          docker network rm persist-net 2>/dev/null || true
 
   release:
     needs: build

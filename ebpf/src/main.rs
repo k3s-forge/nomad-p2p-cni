@@ -3,7 +3,7 @@
 
 use aya_ebpf::{
     macros::{classifier, cgroup_connect4, map, xdp},
-    maps::{Array, HashMap, PerCpuArray, RingBuf},
+    maps::{HashMap, RingBuf},
     programs::{TcContext, CgroupConnect4Context, XdpContext},
     EbpfContext,
 };
@@ -20,10 +20,10 @@ pub static NODE_DYNAMIC_MAP: HashMap<u32, PeerEndpoint> = HashMap::<u32, PeerEnd
 pub static ROUTE_MISS_RINGBUF: RingBuf<u32> = RingBuf::<u32>::pinned(65536, 0);
 
 #[map]
-pub static GENEVE_IFINDEX_MAP: PerCpuArray<u32> = PerCpuArray::<u32>::pinned(1, 0);
+pub static GENEVE_IFINDEX_MAP: HashMap<u32, u32> = HashMap::<u32, u32>::pinned(1, 0);
 
 #[map]
-pub static TUNNEL_CFG_MAP: PerCpuArray<TunnelCfg> = PerCpuArray::<TunnelCfg>::pinned(1, 0);
+pub static TUNNEL_CFG_MAP: HashMap<u32, TunnelCfg> = HashMap::<u32, TunnelCfg>::pinned(1, 0);
 
 #[map]
 pub static VIP_MAP: HashMap<u32, VipInfo> = HashMap::<u32, VipInfo>::pinned(1024, 0);
@@ -32,7 +32,7 @@ pub static VIP_MAP: HashMap<u32, VipInfo> = HashMap::<u32, VipInfo>::pinned(1024
 pub static ACL_MAP: HashMap<u32, AclRule> = HashMap::<u32, AclRule>::pinned(4096, 0);
 
 #[map]
-pub static DEFAULT_POLICY: PerCpuArray<u8> = PerCpuArray::<u8>::pinned(1, 0);
+pub static DEFAULT_POLICY: HashMap<u32, u8> = HashMap::<u32, u8>::pinned(1, 0);
 
 // TC egress: Geneve encapsulation for mesh traffic
 #[classifier]
@@ -115,7 +115,7 @@ unsafe fn try_firewall(ctx: &TcContext) -> Result<i32, i64> {
         return Ok(tc_action::TC_ACT_PIPE);
     }
 
-    let src_ip: u32 = ctx.load(12)?;
+    let src_ip: u32 = ctx.load(26)?;
     let _protocol: u8 = (ctx.load::<u16>(23)? >> 8) as u8;
 
     let default = DEFAULT_POLICY.get(&0u32).copied().unwrap_or(1);
@@ -155,6 +155,10 @@ unsafe fn try_vip(ctx: &CgroupConnect4Context) -> Result<i32, i64> {
             ctx.set_user_ip(backend.ip);
             ctx.set_user_port(u16::from_be(backend.port));
 
+            // NOTE: next_idx update has a known race condition. Multiple concurrent
+            // cgroup/connect4 calls may read and write next_idx non-atomically,
+            // causing transient load imbalance. For aya-ebpf 0.13, this can be
+            // mitigated with bpf_spin_lock when kernel >= 5.1 and aya-ebpf >= 0.13.
             let next = ((idx + 1) % (vip_info.count as usize)) as u8;
             if next != vip_info.next_idx {
                 let mut info = *vip_info;

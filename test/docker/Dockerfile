@@ -4,7 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
     curl wget unzip gnupg2 software-properties-common \
-    iproute2 iptables jq net-tools \
+    iproute2 iptables jq net-tools iputils-ping \
     clang llvm libbpf-dev libelf-dev zlib1g-dev \
     python3 \
     && rm -rf /var/lib/apt/lists/*
@@ -15,14 +15,22 @@ RUN wget -q https://releases.hashicorp.com/nomad/1.7.6/nomad_1.7.6_linux_amd64.z
     && rm /tmp/nomad.zip \
     && nomad version
 
-# Copy binary and BPF artifacts
+# CNI plugin directory
+RUN mkdir -p /opt/cni/bin /opt/cni/config
+
+# Copy binaries
 COPY bin/nomad-p2p-agent-rust /usr/local/bin/nomad-p2p-agent-rust
+COPY bin/nomad-p2p-cni /opt/cni/bin/nomad-p2p-cni
 COPY bin/*.bpf.o /opt/bpf/
-COPY test/nomad/*.json /etc/nomad/
+
+# Copy configs
+COPY test/nomad/client.hcl /etc/nomad/client.hcl
+COPY test/nomad/agent.json /etc/nomad-p2p/config.json
+COPY test/cni/*.conflist /opt/cni/config/
 COPY test/docker/*.sh /opt/test/
 
-RUN chmod +x /opt/test/*.sh /usr/local/bin/nomad-p2p-agent-rust
+RUN chmod +x /opt/test/*.sh /usr/local/bin/nomad-p2p-agent-rust /opt/cni/bin/nomad-p2p-cni
 
-EXPOSE 4646 4647 4648 9527
+EXPOSE 4646 4647 4648 9527 9091
 
 ENTRYPOINT ["/opt/test/entrypoint.sh"]

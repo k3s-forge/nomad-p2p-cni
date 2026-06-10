@@ -22,28 +22,29 @@ pub async fn serve(
     tracing::info!("metrics server on {}", port);
 
     loop {
-        if stop.load(Ordering::SeqCst) {
-            return;
-        }
-
         tokio::select! {
-            _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
-                if stop.load(Ordering::SeqCst) { return; }
-            }
             result = listener.accept() => {
+                if stop.load(Ordering::SeqCst) { return; }
                 if let Ok((mut stream, _)) = result {
+                    let state = state.clone();
                     tokio::spawn(async move {
-                        let response = concat!(
-                            "HTTP/1.1 200 OK\r\n",
-                            "Content-Type: text/plain; version=0.0.4\r\n\r\n",
-                            "# HELP nomad_p2p_uptime_seconds Agent uptime\n",
-                            "# TYPE nomad_p2p_uptime_seconds gauge\n",
-                            "nomad_p2p_uptime_seconds 0\n",
+                        let uptime = state.start_time.elapsed().as_secs();
+                        let nat_type = *state.nat_type.read().await as u8;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\n\r\n\
+                             # HELP nomad_p2p_uptime_seconds Agent uptime\n\
+                             # TYPE nomad_p2p_uptime_seconds gauge\n\
+                             nomad_p2p_uptime_seconds {}\n\
+                             # HELP nomad_p2p_nat_type NAT type (0=unknown 1=easy 2=symmetric)\n\
+                             # TYPE nomad_p2p_nat_type gauge\n\
+                             nomad_p2p_nat_type {}\n",
+                            uptime, nat_type
                         );
                         let _ = stream.write_all(response.as_bytes()).await;
                     });
                 }
             }
+            _ = tokio::signal::ctrl_c() => { return; }
         }
     }
 }

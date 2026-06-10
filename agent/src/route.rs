@@ -3,14 +3,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
 use tokio::sync::RwLock;
 
-use crate::AgentState;
+use crate::bpf;
 
 const BATCH_INTERVAL_MS: u64 = 100;
 const COOLDOWN_SECS: u64 = 5;
 const MAX_PENDING: usize = 4096;
+
+pub type KadQuerySender = tokio::sync::mpsc::UnboundedSender<u32>;
 
 pub struct RouteManager {
     pub pending: Arc<RwLock<Vec<u32>>>,
@@ -30,23 +31,18 @@ impl RouteManager {
         if pending_len >= MAX_PENDING {
             return;
         }
-        let mut pending = self.pending.write().await;
-        pending.push(overlay_ip);
+        self.pending.write().await.push(overlay_ip);
     }
 
     pub async fn drain_batch(&self) -> Vec<u32> {
         let now = Instant::now();
         let mut cooldowns = self.cooldowns.write().await;
-
-        // Clean expired cooldowns
         cooldowns.retain(|_, expires| *expires > now);
 
         let mut batch = Vec::new();
         let mut pending = self.pending.write().await;
         for ip in pending.drain(..) {
-            if cooldowns.contains_key(&ip) {
-                continue;
-            }
+            if cooldowns.contains_key(&ip) { continue; }
             cooldowns.insert(ip, now + Duration::from_secs(COOLDOWN_SECS));
             batch.push(ip);
         }
@@ -55,8 +51,10 @@ impl RouteManager {
 }
 
 pub async fn discovery_loop(
-    state: Arc<AgentState>,
+    _state: Arc<crate::AgentState>,
     route_mgr: Arc<RouteManager>,
+    bpf: Arc<std::sync::Mutex<bpf::BpfManager>>,
+    kad_tx: Option<KadQuerySender>,
     stop: Arc<AtomicBool>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(BATCH_INTERVAL_MS));
@@ -74,8 +72,16 @@ pub async fn discovery_loop(
 
         for overlay_ip in &batch {
             tracing::info!("route miss for overlay IP {:08x}", overlay_ip);
-            // TODO: query Kademlia DHT for peer endpoint
-            let _ = &state;
+
+            if let Some(ref tx) = kad_tx {
+                tracing::debug!("querying Kademlia DHT for {:08x}", overlay_ip);
+                let _ = tx.send(*overlay_ip);
+            }
+
+            let bpf_guard = bpf.lock().unwrap();
+            if let Some(ref map) = bpf_guard.maps.container_route {
+                let _ = map.insert(overlay_ip, &1u32, 0);
+            }
         }
 
         if batch.len() > 1 {
@@ -86,17 +92,22 @@ pub async fn discovery_loop(
 
 pub async fn ringbuf_consumer(
     route_mgr: Arc<RouteManager>,
-    bpf: Arc<std::sync::Mutex<crate::bpf::BpfManager>>,
+    bpf: Arc<std::sync::Mutex<bpf::BpfManager>>,
     stop: Arc<AtomicBool>,
 ) {
+    let ringbuf = {
+        let bpf = bpf.lock().unwrap();
+        bpf.ringbuf.clone()
+    };
+
     loop {
         if stop.load(Ordering::SeqCst) { return; }
 
         let result = tokio::task::spawn_blocking({
-            let bpf = bpf.clone();
+            let ringbuf = ringbuf.clone();
             move || {
-                let bpf = bpf.lock().unwrap();
-                if let Some(ref mut ringbuf) = bpf.maps.route_miss_ringbuf.as_mut() {
+                let mut rb = ringbuf.lock().unwrap();
+                if let Some(ref mut ringbuf) = *rb {
                     match ringbuf.next() {
                         Some(data) => {
                             if data.len() >= 4 {

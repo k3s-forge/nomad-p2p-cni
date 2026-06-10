@@ -36,7 +36,6 @@ impl VipMonitor {
             ip: *ip,
             port: *port,
             alive: true,
-            last_check: Instant::now(),
         }).collect();
         map.insert(vip.to_string(), health);
     }
@@ -67,7 +66,7 @@ pub async fn probe_loop(
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Initialize from config
-    for vc in &state.cfg.vip_backends {
+    for vc in &state.cfg.read().await.vip_backends {
         let backends: Vec<(Ipv4Addr, u16)> = vc.backends.iter()
             .filter_map(|s| {
                 let parts: Vec<&str> = s.split(':').collect();

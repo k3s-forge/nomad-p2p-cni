@@ -1,4 +1,3 @@
-use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -11,7 +10,7 @@ pub async fn watch_loop(
     state: Arc<AgentState>,
     stop: Arc<AtomicBool>,
 ) {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::channel();
 
     let mut watcher = match notify::watcher(tx, Duration::from_secs(2)) {
         Ok(w) => w,
@@ -21,8 +20,9 @@ pub async fn watch_loop(
         }
     };
 
+    let config_path = "/etc/nomad-p2p/config.json";
     if let Err(e) = watcher.watch(
-        std::path::Path::new("/etc/nomad-p2p/config.json"),
+        std::path::Path::new(config_path),
         RecursiveMode::NonRecursive,
     ) {
         tracing::warn!("watch config failed: {}", e);
@@ -32,17 +32,61 @@ pub async fn watch_loop(
     loop {
         if stop.load(Ordering::SeqCst) { return; }
 
-        if let Ok(event) = rx.recv_timeout(Duration::from_millis(200)) {
-            match event {
-                DebouncedEvent::Write(_) | DebouncedEvent::Create(_) => {
-                    tracing::info!("config file changed, reloading...");
-                    let _ = &state;
-                    // TODO: reload config and update BPF maps
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(DebouncedEvent::Write(_)) | Ok(DebouncedEvent::Create(_)) => {
+                tracing::info!("config file changed, reloading...");
+                match reload_config(&state).await {
+                    Ok(()) => tracing::info!("config reloaded successfully"),
+                    Err(e) => tracing::warn!("config reload failed: {}", e),
                 }
-                _ => {}
+            }
+            Ok(DebouncedEvent::Remove(_)) => {
+                tracing::debug!("config file removed");
+            }
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if stop.load(Ordering::SeqCst) { return; }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                tracing::warn!("file watcher disconnected");
+                return;
             }
         }
-
-        if stop.load(Ordering::SeqCst) { return; }
     }
+}
+
+async fn reload_config(state: &Arc<AgentState>) -> Result<(), String> {
+    let data = std::fs::read_to_string("/etc/nomad-p2p/config.json")
+        .map_err(|e| format!("read config: {}", e))?;
+    let new_cfg: crate::AgentConfig = serde_json::from_str(&data)
+        .map_err(|e| format!("parse config: {}", e))?;
+
+    let mut cfg = state.cfg.write().await;
+
+    if cfg.stun_servers != new_cfg.stun_servers {
+        tracing::info!("STUN servers updated: {:?}", new_cfg.stun_servers);
+        cfg.stun_servers = new_cfg.stun_servers;
+    }
+
+    if cfg.vip_enabled != new_cfg.vip_enabled {
+        tracing::info!("VIP enabled changed: {} -> {}", cfg.vip_enabled, new_cfg.vip_enabled);
+        cfg.vip_enabled = new_cfg.vip_enabled;
+    }
+
+    if cfg.ipsec_enabled != new_cfg.ipsec_enabled {
+        tracing::info!("IPsec enabled changed: {} -> {}", cfg.ipsec_enabled, new_cfg.ipsec_enabled);
+        cfg.ipsec_enabled = new_cfg.ipsec_enabled;
+    }
+
+    if cfg.firewall_enabled != new_cfg.firewall_enabled {
+        tracing::info!("firewall enabled changed: {} -> {}", cfg.firewall_enabled, new_cfg.firewall_enabled);
+        cfg.firewall_enabled = new_cfg.firewall_enabled;
+    }
+
+    if cfg.metrics_port != new_cfg.metrics_port {
+        tracing::info!("metrics port changed: {} -> {}", cfg.metrics_port, new_cfg.metrics_port);
+        cfg.metrics_port = new_cfg.metrics_port;
+    }
+
+    Ok(())
 }

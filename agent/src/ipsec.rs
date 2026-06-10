@@ -10,14 +10,29 @@ use crate::AgentState;
 pub struct IpsecManager {
     pub spi: u32,
     pub key: Vec<u8>,
+    pub peers: Vec<(String, String)>,
 }
 
 impl IpsecManager {
     pub fn new(spi: u32, key: &str) -> Self {
+        let key_bytes = if key.is_empty() {
+            Self::generate_key()
+        } else if let Ok(decoded) = hex::decode(key) {
+            decoded
+        } else {
+            key.as_bytes().to_vec()
+        };
         Self {
             spi,
-            key: key.as_bytes().to_vec(),
+            key: key_bytes,
+            peers: Vec::new(),
         }
+    }
+
+    fn generate_key() -> Vec<u8> {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        (0..32).map(|_| rng.gen::<u8>()).collect()
     }
 
     pub async fn add_state(&self, src: &str, dst: &str) -> Result<()> {
@@ -123,17 +138,26 @@ impl IpsecManager {
         Ok(())
     }
 
-    pub async fn rotate_key(&mut self, new_key: &str) -> Result<()> {
-        // Store old key for dual-SA rotation
+    pub async fn rotate_key(&mut self) -> Result<()> {
         let old_spi = self.spi;
-        let _old_key = self.key.clone();
-
-        // Update SPI to avoid state conflicts
         self.spi = self.spi.wrapping_add(1);
-        self.key = new_key.as_bytes().to_vec();
+        self.key = Self::generate_key();
 
         tracing::info!("IPsec key rotation: old spi={:08x} new spi={:08x}", old_spi, self.spi);
+
+        for (src, dst) in &self.peers {
+            if let Err(e) = self.add_state(src, dst).await {
+                tracing::warn!("failed to re-apply XFRM state for {} <-> {}: {}", src, dst, e);
+            }
+        }
+
         Ok(())
+    }
+
+    pub fn add_peer(&mut self, src: String, dst: String) {
+        if !self.peers.contains(&(src.clone(), dst.clone())) {
+            self.peers.push((src, dst));
+        }
     }
 }
 
@@ -142,7 +166,7 @@ pub async fn ipsec_loop(
     mut ipsec: Arc<std::sync::Mutex<IpsecManager>>,
     stop: Arc<AtomicBool>,
 ) {
-    if !state.cfg.ipsec_enabled {
+    if !state.cfg.read().await.ipsec_enabled {
         return;
     }
 
@@ -156,17 +180,9 @@ pub async fn ipsec_loop(
 
         {
             let mut ipsec = ipsec.lock().unwrap();
-            // Generate a new key - for now use a deterministic one
-            let new_key = format!("key-rotated-{}", std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs());
-            if let Err(e) = ipsec.rotate_key(&new_key).await {
+            if let Err(e) = ipsec.rotate_key().await {
                 tracing::warn!("IPsec key rotation failed: {}", e);
             }
         }
-
-        // TODO: re-apply XFRM states with new SPI for all known peers
-        tracing::info!("IPsec key rotation completed");
     }
 }

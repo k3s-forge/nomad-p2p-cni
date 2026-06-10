@@ -43,6 +43,44 @@ impl ContainerManager {
         map.remove(container_id);
         tracing::info!("container removed: {}", container_id);
     }
+
+    /// Recover container state from pinned BPF map after agent restart
+    pub async fn recover_from_bpf(&self, bpf: &Arc<std::sync::Mutex<bpf::BpfManager>>) {
+        let ips = {
+            let bpf = bpf.lock().unwrap();
+            bpf.list_container_ips()
+        };
+        let mut map = self.containers.write().await;
+        for ip in ips {
+            let addr = std::net::Ipv4Addr::from(ip);
+            let cid = format!("recovered-{}", addr);
+            map.insert(cid.clone(), ContainerInfo {
+                container_id: cid.clone(),
+                ip: addr.to_string(),
+                host_iface: format!("veth-{}", &cid[..cid.len().min(8)]),
+            });
+        }
+        if map.len() > 0 {
+            tracing::info!("recovered {} container IPs from BPF", map.len());
+        }
+    }
+
+    /// Allocate IP via BPF map (avoids collisions on restart)
+    pub fn allocate_from_bpf(bpf: &Arc<std::sync::Mutex<bpf::BpfManager>>, container_id: &str) -> String {
+        let bpf = bpf.lock().unwrap();
+        let hash = container_id.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+        for offset in 0..253u8 {
+            let host = (2u8 + ((hash as u8).wrapping_add(offset))) % 254;
+            if host < 2 { continue; }
+            let ip = u32::from(std::net::Ipv4Addr::new(10, 244, 0, host));
+            if !bpf.is_ip_allocated(ip) {
+                let _ = bpf.update_container_route(ip, 1);
+                return std::net::Ipv4Addr::from(ip).to_string();
+            }
+        }
+        let ip = u32::from(std::net::Ipv4Addr::new(10, 244, 0, 2u8 + (hash % 253) as u8));
+        std::net::Ipv4Addr::from(ip).to_string()
+    }
 }
 
 pub async fn api_server(
@@ -62,10 +100,9 @@ pub async fn api_server(
     tracing::info!("API server on {}", addr);
 
     loop {
-        if stop.load(Ordering::SeqCst) { return; }
-
         tokio::select! {
             result = listener.accept() => {
+                if stop.load(Ordering::SeqCst) { return; }
                 match result {
                     Ok((stream, _)) => {
                         let cm = cm.clone();
@@ -77,7 +114,9 @@ pub async fn api_server(
                     }
                 }
             }
-            _ = tokio::time::sleep(tokio::time::Duration::from_millis(200)) => {}
+            _ = tokio::signal::ctrl_c() => {
+                return;
+            }
         }
     }
 }
@@ -158,12 +197,17 @@ async fn handle_container_cmd(
     let iface = parsed["iface"].as_str().unwrap_or("");
 
     match action {
+        "allocate" => {
+            let ip = ContainerManager::allocate_from_bpf(bpf, container_id);
+            format!("200 OK\r\n\r\n{{\"ip\":\"{}\"}}", ip)
+        }
         "add" => {
             cm.add(container_id, ip, iface).await;
-            // Add to BPF container route map
             if let Ok(ip_addr) = ip.parse::<std::net::Ipv4Addr>() {
                 if let Ok(bpf) = bpf.lock() {
-                    let _ = bpf.update_container_route(u32::from(ip_addr), 1);
+                    if let Err(e) = bpf.update_container_route(u32::from(ip_addr), 1) {
+                        tracing::warn!("BPF container route add failed: {}", e);
+                    }
                 }
             }
             format!("200 OK\r\n\r\n{{\"status\":\"added\"}}")
@@ -172,7 +216,9 @@ async fn handle_container_cmd(
             cm.remove(container_id).await;
             if let Ok(ip_addr) = ip.parse::<std::net::Ipv4Addr>() {
                 if let Ok(bpf) = bpf.lock() {
-                    let _ = bpf.remove_container_route(u32::from(ip_addr));
+                    if let Err(e) = bpf.remove_container_route(u32::from(ip_addr)) {
+                        tracing::warn!("BPF container route del failed: {}", e);
+                    }
                 }
             }
             format!("200 OK\r\n\r\n{{\"status\":\"removed\"}}")
@@ -181,11 +227,6 @@ async fn handle_container_cmd(
             format!("400 Bad Request\r\n\r\n{{\"error\":\"unknown action\"}}")
         }
     }
-}
-
-async fn send_response(stream: tokio::net::TcpStream, status: &str, body: &str) {
-    let response = format!("HTTP/1.1 {}\r\nContent-Length: {}\r\n\r\n{}", status, body.len(), body);
-    send_raw(stream, &response).await;
 }
 
 async fn send_raw(mut stream: tokio::net::TcpStream, response: &str) {

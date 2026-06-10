@@ -5,11 +5,13 @@ use aya::{
 };
 use nomad_p2p_common::{AclRule, PeerEndpoint, TunnelCfg, VipInfo};
 use std::path::Path;
+use std::sync::Arc;
+
+const BPF_PIN_DIR: &str = "/sys/fs/bpf";
 
 pub struct BpfMaps {
     pub container_route: Option<HashMap<MapData, u32, u32>>,
     pub node_dynamic: Option<HashMap<MapData, u32, PeerEndpoint>>,
-    pub route_miss_ringbuf: Option<aya::maps::RingBuf<MapData>>,
     pub geneve_ifindex: Option<HashMap<MapData, u32, u32>>,
     pub tunnel_cfg: Option<HashMap<MapData, u32, TunnelCfg>>,
     pub vip_map: Option<HashMap<MapData, u32, VipInfo>>,
@@ -24,27 +26,73 @@ pub struct BpfManager {
     pub maps: BpfMaps,
     pub links: Vec<Box<dyn aya::programs::Link>>,
     pub pinned: bool,
+    pub ringbuf: Arc<std::sync::Mutex<Option<aya::maps::RingBuf<MapData>>>>,
+}
+
+/// Open a pinned BPF map if it exists, returns None if not yet created
+fn open_pinned<K: aya::Pod, V: aya::Pod>(name: &str) -> Option<HashMap<MapData, K, V>> {
+    let path = format!("{}/{}", BPF_PIN_DIR, name);
+    MapData::from_pin(&path).ok().and_then(|d| HashMap::new(d, 0).ok())
+}
+
+fn open_pinned_ringbuf(name: &str) -> Option<aya::maps::RingBuf<MapData>> {
+    let path = format!("{}/{}", BPF_PIN_DIR, name);
+    MapData::from_pin(&path).ok().and_then(|d| aya::maps::RingBuf::new(d).ok())
 }
 
 impl BpfManager {
+    /// Try recovering from pinned maps (restart scenario)
+    pub fn recover() -> Option<Self> {
+        let container_route = open_pinned::<u32, u32>("CONTAINER_ROUTE_MAP")?;
+        let node_dynamic = open_pinned::<u32, PeerEndpoint>("NODE_DYNAMIC_MAP")?;
+        let ringbuf = open_pinned_ringbuf("ROUTE_MISS_RINGBUF");
+        let geneve_ifindex = open_pinned::<u32, u32>("GENEVE_IFINDEX_MAP")?;
+        let tunnel_cfg = open_pinned::<u32, TunnelCfg>("TUNNEL_CFG_MAP")?;
+
+        let maps = BpfMaps {
+            container_route: Some(container_route),
+            node_dynamic: Some(node_dynamic),
+            geneve_ifindex: Some(geneve_ifindex),
+            tunnel_cfg: Some(tunnel_cfg),
+            vip_map: open_pinned::<u32, VipInfo>("VIP_MAP"),
+            acl_map: open_pinned::<u32, AclRule>("ACL_MAP"),
+            default_policy: open_pinned::<u32, u8>("DEFAULT_POLICY"),
+        };
+
+        let mesh = EbpfLoader::new()
+            .load_file(Path::new("bin/mesh.bpf.o"))
+            .ok()?;
+        let fw = EbpfLoader::new().load_file(Path::new("bin/firewall.bpf.o")).ok();
+        let vip = EbpfLoader::new().load_file(Path::new("bin/vip_balancer.bpf.o")).ok();
+
+        tracing::info!("recovered {} pinned BPF maps from {}", 
+            [&maps.container_route, &maps.node_dynamic, &maps.geneve_ifindex, &maps.tunnel_cfg]
+                .iter().filter(|m| m.is_some()).count(),
+            BPF_PIN_DIR);
+
+        Some(Self {
+            mesh,
+            fw,
+            vip,
+            maps,
+            links: vec![],
+            pinned: true,
+            ringbuf: Arc::new(std::sync::Mutex::new(ringbuf)),
+        })
+    }
+
+    /// Fresh load - creates new BPF maps and pins them
     pub fn load() -> Result<Self> {
+        // Try recovery first (agent restart)
+        if let Some(recovered) = Self::recover() {
+            return Ok(recovered);
+        }
         let mut mesh = EbpfLoader::new()
             .load_file(Path::new("bin/mesh.bpf.o"))
             .context("load mesh BPF")?;
         aya_log::EbpfLogger::init(&mut mesh).ok();
 
-        let maps = BpfMaps {
-            container_route: mesh.take_map("CONTAINER_ROUTE_MAP").ok().and_then(|d| HashMap::new(d, 0).ok()),
-            node_dynamic: mesh.take_map("NODE_DYNAMIC_MAP").ok().and_then(|d| HashMap::new(d, 0).ok()),
-            route_miss_ringbuf: mesh.take_map("ROUTE_MISS_RINGBUF").ok().and_then(|d| aya::maps::RingBuf::new(d).ok()),
-            geneve_ifindex: mesh.take_map("GENEVE_IFINDEX_MAP").ok().and_then(|d| HashMap::new(d, 0).ok()),
-            tunnel_cfg: mesh.take_map("TUNNEL_CFG_MAP").ok().and_then(|d| HashMap::new(d, 0).ok()),
-            vip_map: None,
-            acl_map: None,
-            default_policy: None,
-        };
-
-        let fw = match EbpfLoader::new().load_file(Path::new("bin/firewall.bpf.o")) {
+        let mut fw = match EbpfLoader::new().load_file(Path::new("bin/firewall.bpf.o")) {
             Ok(mut fw) => {
                 aya_log::EbpfLogger::init(&mut fw).ok();
                 Some(fw)
@@ -55,7 +103,7 @@ impl BpfManager {
             }
         };
 
-        let vip = match EbpfLoader::new().load_file(Path::new("bin/vip_balancer.bpf.o")) {
+        let mut vip = match EbpfLoader::new().load_file(Path::new("bin/vip_balancer.bpf.o")) {
             Ok(mut vip) => {
                 aya_log::EbpfLogger::init(&mut vip).ok();
                 Some(vip)
@@ -66,6 +114,27 @@ impl BpfManager {
             }
         };
 
+        let container_route = mesh.take_map("CONTAINER_ROUTE_MAP").ok().and_then(|d| HashMap::new(d, 0).ok());
+        let node_dynamic = mesh.take_map("NODE_DYNAMIC_MAP").ok().and_then(|d| HashMap::new(d, 0).ok());
+        let ringbuf = mesh.take_map("ROUTE_MISS_RINGBUF").ok()
+            .and_then(|d| aya::maps::RingBuf::new(d).ok());
+        let geneve_ifindex = mesh.take_map("GENEVE_IFINDEX_MAP").ok().and_then(|d| HashMap::new(d, 0).ok());
+        let tunnel_cfg = mesh.take_map("TUNNEL_CFG_MAP").ok().and_then(|d| HashMap::new(d, 0).ok());
+
+        let vip_map = vip.as_mut().and_then(|v| v.take_map("VIP_MAP").ok()).and_then(|d| HashMap::new(d, 0).ok());
+        let acl_map = fw.as_mut().and_then(|f| f.take_map("ACL_MAP").ok()).and_then(|d| HashMap::new(d, 0).ok());
+        let default_policy = fw.as_mut().and_then(|f| f.take_map("DEFAULT_POLICY").ok()).and_then(|d| HashMap::new(d, 0).ok());
+
+        let maps = BpfMaps {
+            container_route,
+            node_dynamic,
+            geneve_ifindex,
+            tunnel_cfg,
+            vip_map,
+            acl_map,
+            default_policy,
+        };
+
         Ok(Self {
             mesh,
             fw,
@@ -73,6 +142,7 @@ impl BpfManager {
             maps,
             links: vec![],
             pinned: false,
+            ringbuf: Arc::new(std::sync::Mutex::new(ringbuf)),
         })
     }
 
@@ -116,6 +186,30 @@ impl BpfManager {
             map.remove(&container_ip)?;
         }
         Ok(())
+    }
+
+    /// Query pinned BPF map for existing container IPs (restart recovery)
+    pub fn list_container_ips(&self) -> Vec<u32> {
+        let mut ips = Vec::new();
+        if let Some(ref map) = self.maps.container_route {
+            // Aya 0.13 doesn't expose full iteration on HashMap
+            // Use known range for 10.244.0.0/16 subnet
+            for host in 2u8..254u8 {
+                let ip = u32::from(std::net::Ipv4Addr::new(10, 244, 0, host));
+                if map.get(&ip, 0).is_ok() {
+                    ips.push(ip);
+                }
+            }
+        }
+        ips
+    }
+
+    /// Check if a container IP is already allocated in the pinned BPF map
+    pub fn is_ip_allocated(&self, container_ip: u32) -> bool {
+        if let Some(ref map) = self.maps.container_route {
+            return map.get(&container_ip, 0).is_ok();
+        }
+        false
     }
 
     pub fn attach_all(&mut self, ifindex: u32) -> Result<()> {

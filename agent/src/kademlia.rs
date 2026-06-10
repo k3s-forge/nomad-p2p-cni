@@ -10,7 +10,6 @@ use libp2p::{
     gossipsub, noise, ping, swarm, tcp, yamux,
     Multiaddr, PeerId,
 };
-use tokio::sync::RwLock;
 
 use crate::AgentState;
 
@@ -18,7 +17,6 @@ const GOSSIP_TOPIC: &str = "nomad-p2p/config";
 
 pub struct P2pNetwork {
     pub swarm: swarm::Swarm<P2pBehaviour>,
-    pub kad_store: Arc<RwLock<kad::store::MemoryStore>>,
 }
 
 #[derive(swarm::NetworkBehaviour)]
@@ -45,8 +43,6 @@ pub async fn build_p2p(
         .boxed();
 
     let store = kad::store::MemoryStore::new(local_peer_id);
-    let kad_store = Arc::new(RwLock::new(store.clone()));
-
     let mut kad_cfg = kad::Config::default();
     kad_cfg.set_query_timeout(Duration::from_secs(10));
     let kademlia = kad::Behaviour::new(local_peer_id, store, kad_cfg);
@@ -83,8 +79,10 @@ pub async fn build_p2p(
 
     let mut swarm = swarm::Swarm::new(transport, behaviour, local_peer_id);
 
-    let listen_port = state.cfg.listen_port;
-    swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{}", listen_port).parse()?)?;
+    let listen_port = state.cfg.read().await.p2p_port;
+    if listen_port > 0 {
+        swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{}", listen_port).parse()?)?;
+    }
 
     for seed in seed_addrs {
         if let Ok(addr) = seed.parse::<Multiaddr>() {
@@ -92,12 +90,13 @@ pub async fn build_p2p(
         }
     }
 
-    Ok(P2pNetwork { swarm, kad_store })
+    Ok(P2pNetwork { swarm })
 }
 
 pub async fn kademlia_loop(
     state: Arc<AgentState>,
     mut p2p: P2pNetwork,
+    mut kad_rx: tokio::sync::mpsc::UnboundedReceiver<u32>,
     stop: Arc<AtomicBool>,
 ) {
     let mut bootstrap_interval = tokio::time::interval(Duration::from_secs(60));
@@ -113,17 +112,24 @@ pub async fn kademlia_loop(
                 let public_port = *state.public_port.read().await;
 
                 let record = kad::Record {
-                    key: kad::RecordKey::new(&state.cfg.node_overlay_ip),
+                    key: kad::RecordKey::new(&state.cfg.read().await.node_overlay_ip),
                     value: serde_json::json!({
                         "public_ip": public_ip.to_string(),
                         "public_port": public_port,
-                        "overlay_ip": state.cfg.node_overlay_ip,
-                        "subnet": state.cfg.node_subnet,
+                        "overlay_ip": state.cfg.read().await.node_overlay_ip,
+                        "subnet": state.cfg.read().await.node_subnet,
                     }).to_string().into_bytes(),
                     publisher: None,
                     expires: None,
                 };
                 p2p.swarm.behaviour_mut().kademlia.put_record(record, kad::Quorum::One).ok();
+            }
+            overlay_ip = kad_rx.recv() => {
+                if let Some(ip) = overlay_ip {
+                    tracing::debug!("kad query request for overlay {:08x}", ip);
+                    let key = kad::RecordKey::new(&ip.to_be_bytes());
+                    let _ = p2p.swarm.behaviour_mut().kademlia.get_record(key);
+                }
             }
             event = p2p.swarm.next() => {
                 match event {
@@ -171,12 +177,4 @@ pub async fn kademlia_loop(
         }
         if stop.load(Ordering::SeqCst) { return; }
     }
-}
-
-pub fn query_overlay_ip(
-    kad: &mut kad::Behaviour<kad::store::MemoryStore>,
-    overlay_ip: u32,
-) {
-    let key = kad::RecordKey::new(&overlay_ip.to_be_bytes());
-    let _ = kad.get_record(key);
 }

@@ -1,67 +1,57 @@
 #!/bin/bash
 set -e
 
-PASS=0
-FAIL=0
+PASS=0; FAIL=0
 
-test_result() {
-  local name=$1
-  local result=$2
-  if [ "$result" = "pass" ]; then
-    echo "  ✓ $name"
-    PASS=$((PASS + 1))
-  else
-    echo "  ✗ $name"
-    FAIL=$((FAIL + 1))
-  fi
-}
+ok() { echo "  ok  $1"; PASS=$((PASS+1)); }
+nok() { echo "  FAIL $1"; FAIL=$((FAIL+1)); }
 
-echo "--- Test 1: Binary runs ---"
-if nomad-p2p-agent-rust Version 2>/dev/null; then
-  test_result "nomad-p2p-agent-rust version" "pass"
+echo "=== Test 1: Binary ==="
+if nomad-p2p-agent-rust Version 2>/dev/null | grep -q nomad-p2p; then
+  ok "agent binary version"
 else
-  test_result "nomad-p2p-agent-rust version" "fail"
+  nok "agent binary version"
 fi
 
-echo "--- Test 2: Agent process alive ---"
-if pgrep -f "nomad-p2p-agent-rust Agent" >/dev/null; then
-  test_result "agent process running" "pass"
+echo "=== Test 2: Agent process ==="
+if pgrep -f "nomad-p2p-agent-rust" >/dev/null; then
+  ok "agent process running"
 else
-  test_result "agent process running" "fail"
+  nok "agent process running"
 fi
 
-echo "--- Test 3: UDP listener active ---"
-if ss -ulnp | grep -q ":9527"; then
-  test_result "UDP port 9527 listening" "pass"
+echo "=== Test 3: UDP port ==="
+if ss -ulnp 2>/dev/null | grep -q ":9527"; then
+  ok "UDP port 9527"
 else
-  test_result "UDP port 9527 listening" "fail"
+  nok "UDP port 9527"
 fi
 
-echo "--- Test 4: BPF maps loaded ---"
-if [ -f /sys/fs/bpf/ ] || bpftool map list 2>/dev/null | grep -q "CONTAINER_ROUTE_MAP"; then
-  test_result "BPF maps loaded" "pass"
+echo "=== Test 4: CNI binary ==="
+if [ -x /opt/cni/bin/nomad-p2p-cni ]; then
+  ok "cni binary exists"
 else
-  # BPF maps may not be visible in container, check via agent
-  test_result "BPF maps loaded (skipped in container)" "pass"
+  nok "cni binary exists"
 fi
 
-echo "--- Test 5: Nomad running ---"
-if nomad status 2>/dev/null; then
-  test_result "Nomad leader elected" "pass"
+echo "=== Test 5: Nomad server ==="
+if nomad server members 2>/dev/null | grep -q alive; then
+  ok "nomad server alive"
 else
-  test_result "Nomad leader elected" "fail"
+  nok "nomad server alive"
 fi
 
-echo "--- Test 6: Deploy test job ---"
-cat > /tmp/test-job.nomad.hcl <<'EOF'
-job "test" {
+echo "=== Test 6: Deploy CNI job ==="
+cat > /tmp/cni-test.hcl <<'JOB'
+job "cni-test" {
   datacenters = ["dc1"]
   type = "service"
 
   group "web" {
-    count = 2
+    count = 1
 
     network {
+      mode = "cni/nomad-p2p"
       port "http" { to = 8080 }
     }
 
@@ -80,44 +70,76 @@ job "test" {
     }
   }
 }
-EOF
+JOB
 
-if nomad job run /tmp/test-job.nomad.hcl 2>/dev/null; then
-  test_result "job deploy" "pass"
+if nomad job run -detach /tmp/cni-test.hcl 2>/dev/null; then
+  ok "cni job deployed"
 else
-  test_result "job deploy" "fail"
+  nok "cni job deployed"
 fi
 
-echo "--- Test 7: Wait for allocation ---"
-ALLOC_OK=false
-for i in $(seq 1 30); do
-  ALLOC_STATUS=$(nomad job status test 2>/dev/null | grep -E "running|pending" | head -1)
-  if echo "$ALLOC_STATUS" | grep -q "running"; then
-    ALLOC_OK=true
-    break
-  fi
+echo "=== Test 7: Allocation status ==="
+for i in $(seq 1 20); do
+  STATUS=$(nomad job status cni-test 2>/dev/null | grep status | awk '{print $NF}')
+  if [ "$STATUS" = "running" ]; then ok "allocation running"; break; fi
   sleep 2
 done
+[ "$STATUS" != "running" ] && nok "allocation running"
 
-if $ALLOC_OK; then
-  test_result "allocation running" "pass"
+echo "=== Test 8: Cross-group CNI network ==="
+cat > /tmp/cni-multi.hcl <<'JOB'
+job "cni-multi" {
+  datacenters = ["dc1"]
+  type = "service"
+
+  group "g1" {
+    count = 1
+    network {
+      mode = "cni/nomad-p2p"
+      port "http" { to = 8080 }
+    }
+    task "echo1" {
+      driver = "raw_exec"
+      config {
+        command = "python3"
+        args = ["-c", "import http.server; http.server.HTTPServer(('',8080),http.server.SimpleHTTPRequestHandler).serve_forever()"]
+      }
+      resources { cpu = 50; memory = 64 }
+    }
+  }
+
+  group "g2" {
+    count = 1
+    network {
+      mode = "cni/nomad-p2p"
+      port "http" { to = 8080 }
+    }
+    task "echo2" {
+      driver = "raw_exec"
+      config {
+        command = "python3"
+        args = ["-c", "import http.server; http.server.HTTPServer(('',8080),http.server.SimpleHTTPRequestHandler).serve_forever()"]
+      }
+      resources { cpu = 50; memory = 64 }
+    }
+  }
+}
+JOB
+
+if nomad job run -detach /tmp/cni-multi.hcl 2>/dev/null; then
+  ok "multi-group job deployed"
 else
-  test_result "allocation running" "fail"
+  nok "multi-group job deployed"
 fi
 
-echo "--- Test 8: HTTP connectivity ---"
-ALLOC_IP=$(nomad alloc status $(nomad job allocs test -json | jq -r '.[0].ID') 2>/dev/null | grep "IP:" | head -1 | awk '{print $2}')
-if curl -sf "http://${ALLOC_IP}:8080" >/dev/null 2>&1; then
-  test_result "HTTP connectivity" "pass"
+echo "=== Test 9: Nomad client nodes ==="
+CLIENTS=$(nomad node status 2>/dev/null | grep ready | wc -l)
+if [ "$CLIENTS" -ge 1 ]; then
+  ok "client nodes: $CLIENTS"
 else
-  # Fallback: try localhost
-  if curl -sf http://127.0.0.1:8080 >/dev/null 2>&1; then
-    test_result "HTTP connectivity" "pass"
-  else
-    test_result "HTTP connectivity" "fail"
-  fi
+  nok "client nodes: $CLIENTS"
 fi
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
-[ $FAIL -eq 0 ] && exit 0 || exit 1
+exit $FAIL

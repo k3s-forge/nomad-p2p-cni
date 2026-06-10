@@ -17,19 +17,15 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Start control plane agent
     Agent {
         #[arg(short, long, default_value = "/etc/nomad-p2p/config.json")]
         config: String,
     },
-    /// Start seed-mode agent (also acts as route registry)
     Seed {
         #[arg(short, long, default_value = "/etc/nomad-p2p/config.json")]
         config: String,
     },
-    /// CNI plugin (called by Nomad)
     Cni,
-    /// Print version
     Version,
 }
 
@@ -49,7 +45,7 @@ async fn main() -> Result<()> {
             run_agent(&config, seed_mode).await?;
         }
         Command::Cni => {
-            run_cni().await?;
+            run_cni()?;
         }
         Command::Version => {
             println!("nomad-p2p v0.4.0");
@@ -71,7 +67,7 @@ async fn run_agent(config_path: &str, seed_mode: bool) -> Result<()> {
     let bpf = {
         let mut bpf = bpf::BpfManager::load()
             .context("load BPF programs")?;
-        bpf.set_tunnel_cfg(state.cfg.tunnel_vni)?;
+        bpf.set_tunnel_cfg(state.cfg.read().await.tunnel_vni)?;
         let ifindex = bpf::find_default_ifindex().await
             .unwrap_or(1);
         bpf.attach_all(ifindex)?;
@@ -81,33 +77,50 @@ async fn run_agent(config_path: &str, seed_mode: bool) -> Result<()> {
     stun::discover(&state).await?;
 
     let proto = protocol::UdpProtocol::bind(
-        *state.public_port.read().await,
-        &state.cfg.psk,
+        state.cfg.read().await.listen_port,
+        &state.cfg.read().await.psk,
     ).await?;
     let proto = Arc::new(tokio::sync::Mutex::new(proto));
 
-    let mut seed_client = seed::SeedClient::new(&state, seed_mode);
-    seed_client.register_all().await;
+    let mut seed_client = seed::SeedClient::new(seed_mode, proto.clone());
+    seed_client.register_all(&state).await;
     let seed_client = Arc::new(tokio::sync::Mutex::new(seed_client));
 
     let route_mgr = Arc::new(route::RouteManager::new());
     let container_mgr = api::ContainerManager::new();
 
-    let ipsec_mgr = if state.cfg.ipsec_enabled {
+    // Recover containers from pinned BPF map (restart persistence)
+    container_mgr.recover_from_bpf(&bpf).await;
+
+    let ipsec_mgr = if state.cfg.read().await.ipsec_enabled {
         Some(Arc::new(std::sync::Mutex::new(ipsec::IpsecManager::new(
-            state.cfg.ipsec_spi,
-            &state.cfg.ipsec_key,
+            state.cfg.read().await.ipsec_spi,
+            &state.cfg.read().await.ipsec_key,
         ))))
     } else {
         None
     };
 
-    let seed_addrs = state.cfg.seeds.iter().map(|s| s.addr.clone()).collect::<Vec<_>>();
+    let seed_addrs = state.cfg.read().await.seeds.iter().map(|s| s.addr.clone()).collect::<Vec<_>>();
     let p2p = kademlia::build_p2p(&state, &seed_addrs).await.ok();
 
+    let (kad_tx, kad_rx) = tokio::sync::mpsc::unbounded_channel();
     let stop = Arc::new(AtomicBool::new(false));
 
-    spawn_tasks(&state, &bpf, &proto, &seed_client, &route_mgr, container_mgr, ipsec_mgr, p2p, &stop).await;
+    let ctx = AppContext {
+        state,
+        bpf,
+        proto,
+        seed_client,
+        route_mgr,
+        container_mgr,
+        ipsec_mgr,
+        p2p,
+        kad_tx,
+        kad_rx,
+        stop: stop.clone(),
+    };
+    ctx.spawn_all().await;
 
     tokio::signal::ctrl_c().await.ok();
     tracing::info!("shutting down...");
@@ -117,82 +130,6 @@ async fn run_agent(config_path: &str, seed_mode: bool) -> Result<()> {
     Ok(())
 }
 
-async fn spawn_tasks(
-    state: &Arc<AgentState>,
-    bpf: &Arc<std::sync::Mutex<bpf::BpfManager>>,
-    proto: &Arc<tokio::sync::Mutex<protocol::UdpProtocol>>,
-    seed_client: &Arc<tokio::sync::Mutex<seed::SeedClient>>,
-    route_mgr: &Arc<route::RouteManager>,
-    container_mgr: api::ContainerManager,
-    ipsec_mgr: Option<Arc<std::sync::Mutex<ipsec::IpsecManager>>>,
-    p2p: Option<kademlia::P2pNetwork>,
-    stop: &Arc<AtomicBool>,
-) {
-    let _ = (proto, seed_client);
-
-    if state.cfg.metrics_port > 0 {
-        tokio::spawn(metrics::serve(
-            state.clone(),
-            state.cfg.metrics_port,
-            stop.clone(),
-        ));
-    }
-
-    tokio::spawn(api::api_server(
-        container_mgr,
-        bpf.clone(),
-        9091,
-        stop.clone(),
-    ));
-
-    let refresh = state.cfg.stun_refresh_interval;
-    tokio::spawn(stun::refresh_loop(
-        state.clone(),
-        refresh,
-        stop.clone(),
-    ));
-
-    tokio::spawn(route::ringbuf_consumer(
-        route_mgr.clone(),
-        bpf.clone(),
-        stop.clone(),
-    ));
-
-    tokio::spawn(route::discovery_loop(
-        state.clone(),
-        route_mgr.clone(),
-        stop.clone(),
-    ));
-
-    if let Some(ipsec) = ipsec_mgr {
-        tokio::spawn(ipsec::ipsec_loop(
-            state.clone(),
-            ipsec,
-            stop.clone(),
-        ));
-    }
-
-    if let Some(p2p) = p2p {
-        tokio::spawn(kademlia::kademlia_loop(
-            state.clone(),
-            p2p,
-            stop.clone(),
-        ));
-    }
-
-    if state.cfg.vip_enabled {
-        let monitor = Arc::new(vip::VipMonitor::new());
-        tokio::spawn(vip::probe_loop(
-            state.clone(),
-            monitor,
-            bpf.clone(),
-            stop.clone(),
-        ));
-    }
-}
-
-async fn run_cni() -> Result<()> {
-    tracing::info!("CNI plugin invoked");
-    let _stdin = tokio::io::stdin();
-    Ok(())
+fn run_cni() -> Result<()> {
+    nomad_p2p_cni::run()
 }

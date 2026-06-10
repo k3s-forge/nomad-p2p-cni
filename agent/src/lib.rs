@@ -44,7 +44,10 @@ pub struct AgentConfig {
     pub tunnel_device: String,
     pub psk: String,
     pub stun_servers: Vec<String>,
+    /// UDP port for peer communication + seed registration
     pub listen_port: u16,
+    /// TCP port for libp2p Kademlia/GossipSub (0 = disabled)
+    pub p2p_port: u16,
     pub stun_refresh_interval: u64,
     pub lazy_discovery: bool,
     pub route_miss_max_pending: usize,
@@ -74,6 +77,7 @@ impl Default for AgentConfig {
             psk: "".into(),
             stun_servers: vec!["stun.l.google.com:19302".into()],
             listen_port: 9527,
+            p2p_port: 0,
             stun_refresh_interval: 120,
             lazy_discovery: true,
             route_miss_max_pending: 256,
@@ -95,7 +99,7 @@ impl Default for AgentConfig {
 }
 
 pub struct AgentState {
-    pub cfg: AgentConfig,
+    pub cfg: RwLock<AgentConfig>,
     pub start_time: Instant,
     pub nat_type: RwLock<nomad_p2p_common::NatType>,
     pub public_ip: RwLock<std::net::Ipv4Addr>,
@@ -104,12 +108,91 @@ pub struct AgentState {
 
 impl AgentState {
     pub fn new(cfg: AgentConfig) -> Self {
+        let listen_port = cfg.listen_port;
         Self {
             start_time: Instant::now(),
             nat_type: RwLock::new(nomad_p2p_common::NatType::Unknown),
             public_ip: RwLock::new(std::net::Ipv4Addr::new(0, 0, 0, 0)),
-            public_port: RwLock::new(cfg.listen_port),
-            cfg,
+            public_port: RwLock::new(listen_port),
+            cfg: RwLock::new(cfg),
+        }
+    }
+}
+
+/// Bundled runtime state for task spawning (replaces long parameter lists)
+pub struct AppContext {
+    pub state: Arc<AgentState>,
+    pub bpf: Arc<std::sync::Mutex<bpf::BpfManager>>,
+    pub proto: Arc<tokio::sync::Mutex<protocol::UdpProtocol>>,
+    pub seed_client: Arc<tokio::sync::Mutex<seed::SeedClient>>,
+    pub route_mgr: Arc<route::RouteManager>,
+    pub container_mgr: api::ContainerManager,
+    pub ipsec_mgr: Option<Arc<std::sync::Mutex<ipsec::IpsecManager>>>,
+    pub p2p: Option<kademlia::P2pNetwork>,
+    pub kad_tx: tokio::sync::mpsc::UnboundedSender<u32>,
+    pub kad_rx: tokio::sync::mpsc::UnboundedReceiver<u32>,
+    pub stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl AppContext {
+    pub async fn spawn_all(self) {
+        let stop = self.stop.clone();
+        let state = self.state.clone();
+        let bpf = self.bpf.clone();
+        let proto = self.proto.clone();
+        let route_mgr = self.route_mgr.clone();
+
+        if state.cfg.read().await.metrics_port > 0 {
+            tokio::spawn(metrics::serve(
+                state.clone(),
+                state.cfg.read().await.metrics_port,
+                stop.clone(),
+            ));
+        }
+
+        tokio::spawn(api::api_server(
+            self.container_mgr,
+            bpf.clone(),
+            9091,
+            stop.clone(),
+        ));
+
+        tokio::spawn(protocol::recv_loop(proto.clone(), bpf.clone(), stop.clone()));
+
+        tokio::spawn(seed::health_loop(
+            state.clone(),
+            self.seed_client,
+            proto.clone(),
+            stop.clone(),
+        ));
+
+        tokio::spawn(stun::refresh_loop(
+            state.clone(),
+            state.cfg.read().await.stun_refresh_interval,
+            stop.clone(),
+        ));
+
+        tokio::spawn(route::ringbuf_consumer(route_mgr.clone(), bpf.clone(), stop.clone()));
+
+        tokio::spawn(route::discovery_loop(
+            state.clone(),
+            route_mgr.clone(),
+            bpf.clone(),
+            Some(self.kad_tx),
+            stop.clone(),
+        ));
+
+        if let Some(ipsec) = self.ipsec_mgr {
+            tokio::spawn(ipsec::ipsec_loop(state.clone(), ipsec, stop.clone()));
+        }
+
+        if let Some(p2p) = self.p2p {
+            tokio::spawn(kademlia::kademlia_loop(state.clone(), p2p, self.kad_rx, stop.clone()));
+        }
+
+        if state.cfg.read().await.vip_enabled {
+            let monitor = Arc::new(vip::VipMonitor::new());
+            tokio::spawn(vip::probe_loop(state, monitor, bpf, stop));
         }
     }
 }

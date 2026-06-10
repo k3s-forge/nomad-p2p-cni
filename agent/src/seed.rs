@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 use nomad_p2p_common::NatType;
 
 use crate::AgentState;
+use crate::protocol::UdpProtocol;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -45,86 +46,98 @@ pub struct NodeRegistration {
 
 #[derive(Clone)]
 pub struct SeedClient {
-    pub conns: Arc<RwLock<Vec<(String, tokio::net::UdpSocket)>>>,
+    pub conns: Arc<RwLock<Vec<(String, SocketAddr)>>>,
     pub seed_mode: bool,
+    proto: Arc<tokio::sync::Mutex<UdpProtocol>>,
 }
 
 impl SeedClient {
-    pub fn new(state: &Arc<AgentState>, seed_mode: bool) -> Self {
-        let _ = state;
+    pub fn new(seed_mode: bool, proto: Arc<tokio::sync::Mutex<UdpProtocol>>) -> Self {
         Self {
             conns: Arc::new(RwLock::new(Vec::new())),
             seed_mode,
+            proto,
         }
     }
 
-    pub async fn register_all(&mut self) {
-        // TODO: connect to seeds and register with AgentConfig
-    }
-
-    pub async fn register(&self, state: &Arc<AgentState>, addr: &str) {
-        if let Ok(remote) = addr.parse::<SocketAddr>() {
-            if let Ok(socket) = tokio::net::UdpSocket::bind("0.0.0.0:0").await {
-                let _ = socket.connect(remote).await;
-                let mut conns = self.conns.write().await;
-                conns.push((addr.to_string(), socket));
-                tracing::info!("registered with seed {}", addr);
+    pub async fn register_all(&self, state: &Arc<AgentState>) {
+        for seed in &state.cfg.read().await.seeds {
+            if let Ok(addr) = seed.addr.parse::<SocketAddr>() {
+                if let Err(e) = self.register(state, addr).await {
+                    tracing::warn!("failed to register with seed {}: {}", seed.addr, e);
+                }
             }
         }
     }
+
+    pub async fn register(&self, state: &Arc<AgentState>, addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let public_ip = *state.public_ip.read().await;
+        let public_port = *state.public_port.read().await;
+        let nat_type = *state.nat_type.read().await;
+
+        let msg = Message {
+            msg_type: "register".into(),
+            qid: Some(format!("{:016x}", rand::random::<u64>())),
+            ts: now_ts(),
+            nonce: format!("{:016x}", rand::random::<u64>()),
+            node_info: Some(NodeRegistration {
+                overlay_ip: state.cfg.read().await.node_overlay_ip.clone(),
+                public_ip: public_ip.to_string(),
+                public_port,
+                subnet: state.cfg.read().await.node_subnet.clone(),
+                relay_capable: false,
+                nat_type,
+            }),
+            query_ip: None,
+            nodes: None,
+            relay: None,
+        };
+
+        let mut proto = self.proto.lock().await;
+        proto.send_to(&msg, &addr).await?;
+        tracing::info!("registered with seed {}", addr);
+
+        let mut conns = self.conns.write().await;
+        conns.push((addr.to_string(), addr));
+
+        Ok(())
+    }
+
+    pub async fn query_peer(&self, overlay_ip: &str, addr: SocketAddr) -> Option<Vec<NodeRegistration>> {
+        let msg = Message {
+            msg_type: "query".into(),
+            qid: Some(format!("{:016x}", rand::random::<u64>())),
+            ts: now_ts(),
+            nonce: format!("{:016x}", rand::random::<u64>()),
+            node_info: None,
+            query_ip: Some(overlay_ip.to_string()),
+            nodes: None,
+            relay: None,
+        };
+
+        let mut proto = self.proto.lock().await;
+        if proto.send_to(&msg, &addr).await.is_err() {
+            tracing::warn!("failed to query seed {} for {}", addr, overlay_ip);
+            return None;
+        }
+        drop(proto);
+
+        tracing::info!("queried seed {} for peer {}", addr, overlay_ip);
+        None
+    }
 }
 
-pub async fn register_with_seed(
-    state: &Arc<AgentState>,
-    addr: &str,
-) -> Option<tokio::net::UdpSocket> {
-    let remote: SocketAddr = match addr.parse() {
-        Ok(a) => a,
-        Err(_) => return None,
-    };
-    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await.ok()?;
-    socket.connect(remote).await.ok()?;
-
-    let public_ip = *state.public_ip.read().await;
-    let public_port = *state.public_port.read().await;
-    let nat_type = *state.nat_type.read().await;
-
-    let msg = Message {
-        msg_type: "register".into(),
-        qid: None,
-        ts: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64,
-        nonce: format!("{:x}", ts_now()),
-        node_info: Some(NodeRegistration {
-            overlay_ip: state.cfg.node_overlay_ip.clone(),
-            public_ip: public_ip.to_string(),
-            public_port,
-            subnet: state.cfg.node_subnet.clone(),
-            relay_capable: false,
-            nat_type,
-        }),
-        query_ip: None,
-        nodes: None,
-        relay: None,
-    };
-
-    let payload = serde_json::to_vec(&msg).ok()?.len();
-    let _ = payload;
-    Some(socket)
-}
-
-fn ts_now() -> u64 {
+fn now_ts() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
+        .as_secs() as i64
 }
 
 pub async fn health_loop(
     state: Arc<AgentState>,
-    _client: SeedClient,
+    client: Arc<tokio::sync::Mutex<SeedClient>>,
+    proto: Arc<tokio::sync::Mutex<UdpProtocol>>,
     stop: Arc<AtomicBool>,
 ) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
@@ -132,7 +145,8 @@ pub async fn health_loop(
         if stop.load(Ordering::SeqCst) { return; }
         interval.tick().await;
         if stop.load(Ordering::SeqCst) { return; }
-        let _ = &state;
-        tracing::trace!("health check tick");
+
+        let client = client.lock().await;
+        client.register_all(&state).await;
     }
 }

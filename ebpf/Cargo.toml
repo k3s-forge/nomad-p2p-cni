@@ -6,8 +6,8 @@ license = { workspace = true }
 authors = { workspace = true }
 
 [dependencies]
-aya-ebpf = "0.13"
-aya-log-ebpf = "0.13"
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.1"
 nomad-p2p-common = { path = "../common" }
 
 [lib]
@@ -17,4 +17,4 @@ crate-type = ["cdylib"]
 lto = true
 codegen-units = 1
 panic = "abort"
-strip = true
+opt-level = "s"

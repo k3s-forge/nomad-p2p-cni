@@ -81,15 +81,19 @@ fn parse_stun_response(data: &[u8]) -> Result<StunResult> {
             let ip = std::net::Ipv4Addr::new(
                 data[off + 6], data[off + 7], data[off + 8], data[off + 9],
             );
-            let (mut ip_bytes, mut port) = (u32::from(ip), port as u32);
             if attr_type == 0x0020 {
-                ip_bytes ^= STUN_MAGIC_COOKIE;
-                port ^= (STUN_MAGIC_COOKIE >> 16) & 0xFFFF;
+                // RFC 5389 S15.2: byte-wise XOR with magic cookie 0x2112A442
+                // XOR port: high 16 bits of magic cookie = 0x2112
+                let port = port ^ 0x2112u16;
+                let ip = std::net::Ipv4Addr::new(
+                    data[off + 6] ^ 0x21,
+                    data[off + 7] ^ 0x12,
+                    data[off + 8] ^ 0xA4,
+                    data[off + 9] ^ 0x42,
+                );
+                return Ok(StunResult { public_ip: ip, public_port: port });
             }
-            return Ok(StunResult {
-                public_ip: std::net::Ipv4Addr::from(ip_bytes),
-                public_port: port as u16,
-            });
+            return Ok(StunResult { public_ip: ip, public_port: port });
         }
         off += 4 + attr_len;
         if attr_len % 4 != 0 {
@@ -133,10 +137,10 @@ pub async fn detect_nat_type(servers: &[String], timeout: std::time::Duration) -
 }
 
 pub async fn discover(state: &Arc<AgentState>) -> Result<()> {
-    let servers = &state.cfg.stun_servers;
+    let servers = &state.cfg.read().await.stun_servers;
     if servers.is_empty() {
         tracing::info!("no STUN servers configured, using overlay IP");
-        *state.public_ip.write().await = state.cfg.node_overlay_ip.parse()?;
+        *state.public_ip.write().await = state.cfg.read().await.node_overlay_ip.parse()?;
         return Ok(());
     }
 
@@ -149,7 +153,7 @@ pub async fn discover(state: &Arc<AgentState>) -> Result<()> {
         }
         Err(e) => {
             tracing::warn!("STUN failed: {}, using overlay IP", e);
-            *state.public_ip.write().await = state.cfg.node_overlay_ip.parse()?;
+            *state.public_ip.write().await = state.cfg.read().await.node_overlay_ip.parse()?;
         }
     }
 

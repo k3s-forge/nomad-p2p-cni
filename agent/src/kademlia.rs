@@ -5,11 +5,14 @@ use std::time::Duration;
 use anyhow::Result;
 use futures::StreamExt;
 use libp2p::{
-    core::upgrade,
+    core::{upgrade, Transport},
     identify, identity, kad,
-    gossipsub, noise, ping, swarm, tcp, yamux,
+    gossipsub, noise, ping,
+    swarm::{self, NetworkBehaviour, SwarmEvent},
+    tcp, yamux,
     Multiaddr, PeerId,
 };
+use tokio::sync::RwLock;
 
 use crate::AgentState;
 
@@ -19,7 +22,7 @@ pub struct P2pNetwork {
     pub swarm: swarm::Swarm<P2pBehaviour>,
 }
 
-#[derive(swarm::NetworkBehaviour)]
+#[derive(NetworkBehaviour)]
 pub struct P2pBehaviour {
     pub kademlia: kad::Behaviour<kad::store::MemoryStore>,
     pub gossipsub: gossipsub::Behaviour,
@@ -35,9 +38,10 @@ pub async fn build_p2p(
     let local_peer_id = PeerId::from(local_key.public());
 
     let tcp_trans = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true));
+    let noise_keys = noise::Config::new(&local_key).map_err(|e| anyhow::anyhow!("noise: {}", e))?;
     let transport = tcp_trans
         .upgrade(upgrade::Version::V1Lazy)
-        .authenticate(noise::Config::new(&local_key)?)
+        .authenticate(noise_keys)
         .multiplex(yamux::Config::default())
         .timeout(Duration::from_secs(20))
         .boxed();
@@ -54,12 +58,12 @@ pub async fn build_p2p(
         .history_length(5)
         .history_gossip(3)
         .build()
-        .map_err(|e| anyhow::anyhow!("GossipSub config: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("gossipsub: {}", e))?;
     let mut gossipsub = gossipsub::Behaviour::new(
         gossipsub::MessageAuthenticity::Signed(local_key.clone()),
         gossipsub_config,
-    )?;
-    gossipsub.subscribe(&gossipsub::IdentTopic::new(GOSSIP_TOPIC))?;
+    ).map_err(|e| anyhow::anyhow!("gossipsub: {}", e))?;
+    gossipsub.subscribe(&gossipsub::IdentTopic::new(GOSSIP_TOPIC)).map_err(|e| anyhow::anyhow!("subscribe: {}", e))?;
 
     let identify = identify::Behaviour::new(
         identify::Config::new("/nomad-p2p/identify/1.0.0".to_string(), local_key.public())
@@ -77,7 +81,7 @@ pub async fn build_p2p(
         ping,
     };
 
-    let mut swarm = swarm::Swarm::new(transport, behaviour, local_peer_id);
+    let mut swarm = swarm::Swarm::new(transport, behaviour, local_peer_id, swarm::Config::with_tokio_executor());
 
     let listen_port = state.cfg.read().await.p2p_port;
     if listen_port > 0 {
@@ -126,14 +130,13 @@ pub async fn kademlia_loop(
             }
             overlay_ip = kad_rx.recv() => {
                 if let Some(ip) = overlay_ip {
-                    tracing::debug!("kad query request for overlay {:08x}", ip);
                     let key = kad::RecordKey::new(&ip.to_be_bytes());
                     let _ = p2p.swarm.behaviour_mut().kademlia.get_record(key);
                 }
             }
             event = p2p.swarm.next() => {
                 match event {
-                    Some(swarm::SwarmEvent::Behaviour(P2pBehaviourEvent::Kademlia(
+                    Some(SwarmEvent::Behaviour(P2pBehaviourEvent::Kademlia(
                         kad::Event::OutboundQueryCompleted { result, .. }
                     ))) => {
                         match result {
@@ -150,25 +153,25 @@ pub async fn kademlia_loop(
                             _ => {}
                         }
                     }
-                    Some(swarm::SwarmEvent::Behaviour(P2pBehaviourEvent::Identify(
+                    Some(SwarmEvent::Behaviour(P2pBehaviourEvent::Identify(
                         identify::Event::Received { info, .. }
                     ))) => {
                         tracing::info!("identified peer: {:?}", info.public_key);
                     }
-                    Some(swarm::SwarmEvent::Behaviour(P2pBehaviourEvent::Gossipsub(
+                    Some(SwarmEvent::Behaviour(P2pBehaviourEvent::Gossipsub(
                         gossipsub::Event::Message { message, .. }
                     ))) => {
                         if let Ok(text) = String::from_utf8(message.data) {
                             tracing::info!("gossip: {}", text);
                         }
                     }
-                    Some(swarm::SwarmEvent::NewListenAddr { address, .. }) => {
+                    Some(SwarmEvent::NewListenAddr { address, .. }) => {
                         tracing::info!("listening on {}", address);
                     }
-                    Some(swarm::SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
+                    Some(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
                         tracing::info!("connected to {}", peer_id);
                     }
-                    Some(swarm::SwarmEvent::ConnectionClosed { peer_id, .. }) => {
+                    Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
                         tracing::info!("disconnected from {}", peer_id);
                     }
                     _ => {}

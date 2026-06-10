@@ -2,16 +2,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nomad_p2p_common::{NatType, PeerEndpoint};
+use tokio::net::UdpSocket;
 
 use crate::AgentState;
 use crate::protocol::UdpProtocol;
 use crate::seed::{Message, RelayInfo};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RelayResponse {
-    pub relay_ip: String,
-    pub relay_port: u16,
-}
 
 pub async fn try_relay(
     state: &Arc<AgentState>,
@@ -61,11 +56,11 @@ async fn query_seed_for_relay(
 
     if let Ok(response) = serde_json::from_slice::<Message>(&buf) {
         if let Some(relay) = response.relay {
-            if let Ok(ip) = relay.relay_ip.parse() {
+            if let Ok(ip) = relay.relay_ip.parse::<std::net::Ipv4Addr>() {
                 return Some(PeerEndpoint {
-                    public_ip: ip,
+                    public_ip: u32::from(ip),
                     port: relay.relay_port,
-                    nat_type: NatType::Unknown,
+                    nat_type: NatType::Unknown as u8,
                 });
             }
         }

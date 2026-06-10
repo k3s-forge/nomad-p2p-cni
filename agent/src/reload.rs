@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use notify::{DebouncedEvent, RecursiveMode, Watcher};
+use notify::{Event, EventKind, RecursiveMode, Watcher};
 
 use crate::AgentState;
 
@@ -12,7 +12,11 @@ pub async fn watch_loop(
 ) {
     let (tx, rx) = std::sync::mpsc::channel();
 
-    let mut watcher = match notify::watcher(tx, Duration::from_secs(2)) {
+    let mut watcher = match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
+        if let Ok(event) = res {
+            let _ = tx.send(event);
+        }
+    }) {
         Ok(w) => w,
         Err(e) => {
             tracing::warn!("file watcher not available: {}", e);
@@ -33,17 +37,21 @@ pub async fn watch_loop(
         if stop.load(Ordering::SeqCst) { return; }
 
         match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(DebouncedEvent::Write(_)) | Ok(DebouncedEvent::Create(_)) => {
-                tracing::info!("config file changed, reloading...");
-                match reload_config(&state).await {
-                    Ok(()) => tracing::info!("config reloaded successfully"),
-                    Err(e) => tracing::warn!("config reload failed: {}", e),
+            Ok(event) => {
+                match event.kind {
+                    EventKind::Modify(_) | EventKind::Create(_) => {
+                        tracing::info!("config file changed, reloading...");
+                        match reload_config(&state).await {
+                            Ok(()) => tracing::info!("config reloaded successfully"),
+                            Err(e) => tracing::warn!("config reload failed: {}", e),
+                        }
+                    }
+                    EventKind::Remove(_) => {
+                        tracing::debug!("config file removed");
+                    }
+                    _ => {}
                 }
             }
-            Ok(DebouncedEvent::Remove(_)) => {
-                tracing::debug!("config file removed");
-            }
-            Ok(_) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if stop.load(Ordering::SeqCst) { return; }
             }

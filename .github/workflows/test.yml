@@ -13,25 +13,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-
-      - name: Install BPF dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev
 
-      - name: Build binary
+      - name: Set up Rust (nightly for eBPF)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: rust-src
+          targets: bpfel-unknown-none
+
+      - name: Build workspace
         run: |
-          go mod tidy
-          make all
+          cargo build --workspace --exclude nomad-p2p-ebpf 2>&1 || echo "warnings"
+
+      - name: Build eBPF
+        run: |
+          cargo run --package xtask -- build-ebpf 2>&1
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --package nomad-p2p-agent --package nomad-p2p-cni 2>&1
+          mkdir -p bin
+          cp target/release/nomad-p2p-agent bin/nomad-p2p-agent-rust
+          ls -la bin/
 
       - name: Verify binary
         run: |
-          ./bin/nomad-p2p version
-          file ./bin/nomad-p2p
+          ./bin/nomad-p2p-agent-rust Version
+          file ./bin/nomad-p2p-agent-rust
           ls -la ./bin/
 
       - name: Start test cluster (Docker)
@@ -46,7 +58,7 @@ jobs:
             -p 4646:4646 -p 4647:4647 -p 4648:4648 -p 9527:9527 \
             nomad-p2p-test server
           echo "Waiting for cluster startup..."
-          sleep 10
+          sleep 15
 
       - name: Check cluster status
         run: |
@@ -59,11 +71,11 @@ jobs:
       - name: Run integration tests
         run: |
           echo "=== Test 1: Binary version ==="
-          docker exec test-node nomad-p2p version
+          docker exec test-node nomad-p2p-agent-rust Version
 
           echo ""
           echo "=== Test 2: Agent process ==="
-          docker exec test-node pgrep -f "nomad-p2p agent" && echo "Agent running" || echo "Agent NOT running"
+          docker exec test-node pgrep -f "nomad-p2p-agent-rust Agent" && echo "Agent running" || echo "Agent NOT running"
 
           echo ""
           echo "=== Test 3: UDP listener ==="

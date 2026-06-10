@@ -1,4 +1,5 @@
 pub mod bpf;
+pub mod kademlia;
 pub mod metrics;
 pub mod protocol;
 pub mod relay;

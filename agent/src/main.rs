@@ -92,9 +92,12 @@ async fn run_agent(config_path: &str, seed_mode: bool) -> Result<()> {
 
     let route_mgr = Arc::new(route::RouteManager::new());
 
+    let seed_addrs = state.cfg.seeds.iter().map(|s| s.addr.clone()).collect::<Vec<_>>();
+    let p2p = kademlia::build_p2p(&state, &seed_addrs).await.ok();
+
     let stop = Arc::new(AtomicBool::new(false));
 
-    spawn_tasks(&state, &bpf, &proto, &seed_client, &route_mgr, &stop).await;
+    spawn_tasks(&state, &bpf, &proto, &seed_client, &route_mgr, p2p, &stop).await;
 
     tokio::signal::ctrl_c().await.ok();
     tracing::info!("shutting down...");
@@ -110,6 +113,7 @@ async fn spawn_tasks(
     proto: &Arc<tokio::sync::Mutex<protocol::UdpProtocol>>,
     seed_client: &Arc<tokio::sync::Mutex<seed::SeedClient>>,
     route_mgr: &Arc<route::RouteManager>,
+    p2p: Option<kademlia::P2pNetwork>,
     stop: &Arc<AtomicBool>,
 ) {
     let _ = (proto, seed_client);
@@ -122,7 +126,6 @@ async fn spawn_tasks(
         ));
     }
 
-    // STUN refresh
     let refresh = state.cfg.stun_refresh_interval;
     tokio::spawn(stun::refresh_loop(
         state.clone(),
@@ -130,19 +133,25 @@ async fn spawn_tasks(
         stop.clone(),
     ));
 
-    // Route miss ringbuf consumer (reads BPF ringbuf via spawn_blocking)
     tokio::spawn(route::ringbuf_consumer(
         route_mgr.clone(),
         bpf.clone(),
         stop.clone(),
     ));
 
-    // Lazy route discovery with batch drain + cooldown
     tokio::spawn(route::discovery_loop(
         state.clone(),
         route_mgr.clone(),
         stop.clone(),
     ));
+
+    if let Some(p2p) = p2p {
+        tokio::spawn(kademlia::kademlia_loop(
+            state.clone(),
+            p2p,
+            stop.clone(),
+        ));
+    }
 }
 
 async fn run_cni() -> Result<()> {

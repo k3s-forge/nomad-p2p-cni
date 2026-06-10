@@ -1,0 +1,182 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use anyhow::Result;
+use futures::StreamExt;
+use libp2p::{
+    core::upgrade,
+    identify, identity, kad,
+    gossipsub, noise, ping, swarm, tcp, yamux,
+    Multiaddr, PeerId,
+};
+use tokio::sync::RwLock;
+
+use crate::AgentState;
+
+const GOSSIP_TOPIC: &str = "nomad-p2p/config";
+
+pub struct P2pNetwork {
+    pub swarm: swarm::Swarm<P2pBehaviour>,
+    pub kad_store: Arc<RwLock<kad::store::MemoryStore>>,
+}
+
+#[derive(swarm::NetworkBehaviour)]
+pub struct P2pBehaviour {
+    pub kademlia: kad::Behaviour<kad::store::MemoryStore>,
+    pub gossipsub: gossipsub::Behaviour,
+    pub identify: identify::Behaviour,
+    pub ping: ping::Behaviour,
+}
+
+pub async fn build_p2p(
+    state: &Arc<AgentState>,
+    seed_addrs: &[String],
+) -> Result<P2pNetwork> {
+    let local_key = identity::Keypair::generate_ed25519();
+    let local_peer_id = PeerId::from(local_key.public());
+
+    let tcp_trans = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true));
+    let transport = tcp_trans
+        .upgrade(upgrade::Version::V1Lazy)
+        .authenticate(noise::Config::new(&local_key)?)
+        .multiplex(yamux::Config::default())
+        .timeout(Duration::from_secs(20))
+        .boxed();
+
+    let store = kad::store::MemoryStore::new(local_peer_id);
+    let kad_store = Arc::new(RwLock::new(store.clone()));
+
+    let mut kad_cfg = kad::Config::default();
+    kad_cfg.set_query_timeout(Duration::from_secs(10));
+    let kademlia = kad::Behaviour::new(local_peer_id, store, kad_cfg);
+
+    let gossipsub_config = gossipsub::ConfigBuilder::default()
+        .mesh_n(6)
+        .mesh_n_low(4)
+        .mesh_n_high(12)
+        .history_length(5)
+        .history_gossip(3)
+        .build()
+        .map_err(|e| anyhow::anyhow!("GossipSub config: {}", e))?;
+    let mut gossipsub = gossipsub::Behaviour::new(
+        gossipsub::MessageAuthenticity::Signed(local_key.clone()),
+        gossipsub_config,
+    )?;
+    gossipsub.subscribe(&gossipsub::IdentTopic::new(GOSSIP_TOPIC))?;
+
+    let identify = identify::Behaviour::new(
+        identify::Config::new("/nomad-p2p/identify/1.0.0".to_string(), local_key.public())
+            .with_push_listen_addr_updates(true)
+            .with_interval(Duration::from_secs(60)),
+    );
+
+    let ping = ping::Behaviour::new(ping::Config::new()
+        .with_interval(Duration::from_secs(30)));
+
+    let behaviour = P2pBehaviour {
+        kademlia,
+        gossipsub,
+        identify,
+        ping,
+    };
+
+    let mut swarm = swarm::Swarm::new(transport, behaviour, local_peer_id);
+
+    let listen_port = state.cfg.listen_port;
+    swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{}", listen_port).parse()?)?;
+
+    for seed in seed_addrs {
+        if let Ok(addr) = seed.parse::<Multiaddr>() {
+            let _ = swarm.dial(addr);
+        }
+    }
+
+    Ok(P2pNetwork { swarm, kad_store })
+}
+
+pub async fn kademlia_loop(
+    state: Arc<AgentState>,
+    mut p2p: P2pNetwork,
+    stop: Arc<AtomicBool>,
+) {
+    let mut bootstrap_interval = tokio::time::interval(Duration::from_secs(60));
+    bootstrap_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            _ = bootstrap_interval.tick() => {
+                if stop.load(Ordering::SeqCst) { return; }
+                let _ = p2p.swarm.behaviour_mut().kademlia.bootstrap();
+
+                let public_ip = *state.public_ip.read().await;
+                let public_port = *state.public_port.read().await;
+
+                let record = kad::Record {
+                    key: kad::RecordKey::new(&state.cfg.node_overlay_ip),
+                    value: serde_json::json!({
+                        "public_ip": public_ip.to_string(),
+                        "public_port": public_port,
+                        "overlay_ip": state.cfg.node_overlay_ip,
+                        "subnet": state.cfg.node_subnet,
+                    }).to_string().into_bytes(),
+                    publisher: None,
+                    expires: None,
+                };
+                p2p.swarm.behaviour_mut().kademlia.put_record(record, kad::Quorum::One).ok();
+            }
+            event = p2p.swarm.next() => {
+                match event {
+                    Some(swarm::SwarmEvent::Behaviour(P2pBehaviourEvent::Kademlia(
+                        kad::Event::OutboundQueryCompleted { result, .. }
+                    ))) => {
+                        match result {
+                            kad::QueryResult::GetRecord(Ok(ok)) => {
+                                for record in &ok.records {
+                                    if let Ok(value) = String::from_utf8(record.record.value.clone()) {
+                                        tracing::info!("Kad GET: {}", value);
+                                    }
+                                }
+                            }
+                            kad::QueryResult::PutRecord(Ok(_)) => {
+                                tracing::debug!("Kad PUT succeeded");
+                            }
+                            _ => {}
+                        }
+                    }
+                    Some(swarm::SwarmEvent::Behaviour(P2pBehaviourEvent::Identify(
+                        identify::Event::Received { info, .. }
+                    ))) => {
+                        tracing::info!("identified peer: {:?}", info.public_key);
+                    }
+                    Some(swarm::SwarmEvent::Behaviour(P2pBehaviourEvent::Gossipsub(
+                        gossipsub::Event::Message { message, .. }
+                    ))) => {
+                        if let Ok(text) = String::from_utf8(message.data) {
+                            tracing::info!("gossip: {}", text);
+                        }
+                    }
+                    Some(swarm::SwarmEvent::NewListenAddr { address, .. }) => {
+                        tracing::info!("listening on {}", address);
+                    }
+                    Some(swarm::SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
+                        tracing::info!("connected to {}", peer_id);
+                    }
+                    Some(swarm::SwarmEvent::ConnectionClosed { peer_id, .. }) => {
+                        tracing::info!("disconnected from {}", peer_id);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if stop.load(Ordering::SeqCst) { return; }
+    }
+}
+
+pub fn query_overlay_ip(
+    kad: &mut kad::Behaviour<kad::store::MemoryStore>,
+    overlay_ip: u32,
+) {
+    let key = kad::RecordKey::new(&overlay_ip.to_be_bytes());
+    let _ = kad.get_record(key);
+}

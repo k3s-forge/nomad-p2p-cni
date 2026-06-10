@@ -25,6 +25,13 @@ jobs:
           components: rust-src
           targets: bpfel-unknown-none
 
+      - name: Verify rustup components
+        run: |
+          rustup component add rust-src --toolchain nightly
+          rustup target add bpfel-unknown-none --toolchain nightly
+          cargo +nightly --version
+          rustup show nightly
+
       - name: Build workspace
         run: |
           cargo build --workspace --exclude nomad-p2p-ebpf 2>&1 || echo "warnings"

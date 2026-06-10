@@ -45,21 +45,14 @@ else
   test_result "BPF maps loaded (skipped in container)" "pass"
 fi
 
-echo "--- Test 5: Consul running ---"
-if consul members 2>/dev/null | grep -q "alive"; then
-  test_result "Consul cluster healthy" "pass"
-else
-  test_result "Consul cluster healthy" "fail"
-fi
-
-echo "--- Test 6: Nomad running ---"
+echo "--- Test 5: Nomad running ---"
 if nomad status 2>/dev/null; then
   test_result "Nomad leader elected" "pass"
 else
   test_result "Nomad leader elected" "fail"
 fi
 
-echo "--- Test 7: Deploy test job ---"
+echo "--- Test 6: Deploy test job ---"
 cat > /tmp/test-job.nomad.hcl <<'EOF'
 job "test" {
   datacenters = ["dc1"]
@@ -70,12 +63,6 @@ job "test" {
 
     network {
       port "http" { to = 8080 }
-    }
-
-    service {
-      name = "test-web"
-      port = "http"
-      provider = "consul"
     }
 
     task "server" {
@@ -101,7 +88,7 @@ else
   test_result "job deploy" "fail"
 fi
 
-echo "--- Test 8: Wait for allocation ---"
+echo "--- Test 7: Wait for allocation ---"
 ALLOC_OK=false
 for i in $(seq 1 30); do
   ALLOC_STATUS=$(nomad job status test 2>/dev/null | grep -E "running|pending" | head -1)
@@ -118,14 +105,7 @@ else
   test_result "allocation running" "fail"
 fi
 
-echo "--- Test 9: Service registered in Consul ---"
-if consul catalog services 2>/dev/null | grep -q "test-web"; then
-  test_result "service in Consul" "pass"
-else
-  test_result "service in Consul" "fail"
-fi
-
-echo "--- Test 10: HTTP connectivity ---"
+echo "--- Test 8: HTTP connectivity ---"
 ALLOC_IP=$(nomad alloc status $(nomad job allocs test -json | jq -r '.[0].ID') 2>/dev/null | grep "IP:" | head -1 | awk '{print $2}')
 if curl -sf "http://${ALLOC_IP}:8080" >/dev/null 2>&1; then
   test_result "HTTP connectivity" "pass"

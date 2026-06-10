@@ -29,8 +29,6 @@
       "backends": ["10.244.0.10", "10.244.1.10", "10.244.2.10"]
     }
   ],
-  "consul_addr": "",
-  "consul_token": "",
   "firewall_enabled": false,
   "default_policy": "allow",
   "allowed_sources": [],

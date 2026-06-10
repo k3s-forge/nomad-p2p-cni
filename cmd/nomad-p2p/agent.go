@@ -107,11 +107,7 @@ func (a *Agent) run() error {
 	go a.peerPingLoop()
 
 	if a.cfg.VIPEnabled {
-		if a.cfg.ConsulAddr != "" {
-			go a.watchVIPsFromConsul()
-		} else {
-			go a.watchVIPs()
-		}
+		go a.watchVIPs()
 	}
 
 	if a.cfg.IPsecEnabled {

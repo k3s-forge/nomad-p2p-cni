@@ -42,26 +42,20 @@ case "$MODE" in
         wait $AGENT_PID
         ;;
     server)
-        echo "[1/4] Starting nomad-p2p seed agent..."
+        echo "[1/3] Starting nomad-p2p seed agent..."
         nomad-p2p agent --config /tmp/agent.json --seed-mode &
         AGENT_PID=$!
         sleep 2
 
-        echo "[2/4] Starting Consul..."
-        consul agent -dev -bind=127.0.0.1 &
-        CONSUL_PID=$!
-        sleep 2
-
-        echo "[3/4] Starting Nomad..."
+        echo "[2/3] Starting Nomad..."
         nomad agent -dev \
           -bind=0.0.0.0 \
           -network-interface=eth0 \
-          -consul-address=127.0.0.1:8500 \
           -config=/etc/nomad/ &
         NOMAD_PID=$!
         sleep 3
 
-        echo "[4/4] Waiting for Nomad..."
+        echo "[3/3] Waiting for Nomad..."
         for i in $(seq 1 30); do
           if nomad status >/dev/null 2>&1; then
             echo "Nomad ready!"
@@ -76,7 +70,7 @@ case "$MODE" in
 
         echo ""
         echo "=== All tests passed! ==="
-        echo "Keeping services running (PID: agent=$AGENT_PID consul=$CONSUL_PID nomad=$NOMAD_PID)"
+        echo "Keeping services running (PID: agent=$AGENT_PID nomad=$NOMAD_PID)"
         wait
         ;;
     *)

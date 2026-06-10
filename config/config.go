@@ -36,9 +36,6 @@ type Config struct {
 	VIPWatchList []string     `json:"vip_watch_list"`
 	VIPBackends  []VIPBackend `json:"vip_backends"`
 
-	ConsulAddr  string `json:"consul_addr"`
-	ConsulToken string `json:"consul_token"`
-
 	FirewallEnabled bool       `json:"firewall_enabled"`
 	DefaultPolicy   string     `json:"default_policy"`
 	AllowedSources  []string   `json:"allowed_sources"`

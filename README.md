@@ -33,14 +33,12 @@ eBPF-based P2P CNI plugin for HashiCorp Nomad with Geneve overlay tunnels, STUN 
 | Seed      | `seed.go` | Registry, TTL cleanup, heartbeat, peer health, ping loop |
 | STUN      | `stun.go` | NAT type detection (symmetric vs easy), public IP discovery, refresh |
 | Geneve    | `geneve.go` | Geneve device setup |
-| VIP       | `vip.go` | Static & Consul backend merge, BPF map updates |
+| VIP       | `vip.go` | Static backend merge, BPF map updates |
 | Firewall  | `firewall.go` | ACL load/reload |
 | Reload    | `reload.go` | Config hot-reload (5s mtime polling) |
 | Metrics   | `metrics.go` | Prometheus `/metrics`, JSON `/health` |
 | IPsec     | `ipsec.go` | SA management, rotation |
 | CNI       | `cni.go` | ADD/DEL with veth TC, container state tracking |
-| Consul    | `consul.go` | VIP backend discovery |
-| Config    | `config/` | Struct, validation, defaults |
 
 ## Features
 
@@ -78,7 +76,6 @@ BPF route_miss → ringbuf → consumeRouteMiss (producer)
 
 ### VIP load balancing
 - **Static backends**: configured via `vip_backends` in config
-- **Consul backends**: discovered via consul with `?passing=true` health filter
 - **Hot-reload**: file mtime polling (5s), content comparison triggers `updateVIPsFromConfig`
 
 ### Firewall ACLs
@@ -136,8 +133,6 @@ See `config/config.example.json` for a full example.
   "vip_backends": [
     {"vip": "10.100.0.50", "backends": ["10.244.0.10", "10.244.1.10"]}
   ],
-  "consul_addr": "",
-  "consul_token": "",
   "firewall_enabled": false,
   "default_policy": "allow",
   "allowed_sources": [],

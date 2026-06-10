@@ -70,10 +70,6 @@ jobs:
           docker exec test-node ss -ulnp | grep ":9527" && echo "Port 9527 OK" || echo "Port 9527 NOT listening"
 
           echo ""
-          echo "=== Test 4: Consul ==="
-          docker exec test-node consul members 2>/dev/null || echo "Consul check skipped"
-
-          echo ""
           echo "=== Test 5: Nomad ==="
           docker exec test-node nomad status 2>/dev/null || echo "Nomad check skipped"
 

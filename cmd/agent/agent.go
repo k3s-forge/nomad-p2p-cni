@@ -395,7 +395,7 @@ func (a *Agent) watchVIPs() {
 		case <-a.stopCh:
 			return
 		case <-ticker.C:
-			// TODO: query Consul/Nomad for VIP backends and update VIPMap
+			// TODO: query Nomad for VIP backends and update VIPMap
 		}
 	}
 }

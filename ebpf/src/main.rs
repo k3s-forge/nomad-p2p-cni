@@ -7,11 +7,8 @@ use aya_ebpf::{
     programs::{TcContext, CgroupConnect4Context, XdpContext},
     EbpfContext,
 };
+use aya_log_ebpf::info;
 use nomad_p2p_common::*;
-
-macro_rules! info {
-    ($ctx:expr, $($arg:tt)*) => { let _ = format_args!($($arg)*); };
-}
 
 #[map]
 pub static CONTAINER_ROUTE_MAP: HashMap<u32, u32> = HashMap::<u32, u32>::pinned(65536, 0);

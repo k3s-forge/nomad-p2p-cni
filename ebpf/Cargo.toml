@@ -6,7 +6,8 @@ license = { workspace = true }
 authors = { workspace = true }
 
 [dependencies]
-aya-ebpf = "0.1"
+aya-ebpf = { git = "https://github.com/aya-rs/aya", branch = "main" }
+aya-log-ebpf = { git = "https://github.com/aya-rs/aya", branch = "main" }
 nomad-p2p-common = { path = "../common" }
 
 [lib]

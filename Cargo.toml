@@ -17,30 +17,37 @@ authors = ["nomad-p2p-cni contributors"]
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full", "rt-multi-thread", "macros"] }
-# eBPF framework
-# Uses unreleased features from aya main branch (0.13-dev).
-# Falls back to crates.io 0.12.7 if git not available.
-# See: https://github.com/aya-rs/aya
-aya = { version = "0.12", features = ["async_tokio"] }
-aya-log = "0.1"
+
+# eBPF framework — uses unreleased aya features, requires git dependency
+# When aya 0.13 lands on crates.io, switch back to: aya = { version = "0.13", features = ["async_tokio"] }
+aya = { git = "https://github.com/aya-rs/aya", branch = "main" }
+aya-log = { git = "https://github.com/aya-rs/aya", branch = "main" }
+
 # P2P networking
 libp2p = { version = "0.53", features = ["kad", "gossipsub", "tokio", "noise", "yamux", "dns", "identify", "ping", "tcp"] }
+
 # File watcher
 notify = "6"
+
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
 # Utilities
 anyhow = "1"
 thiserror = "1"
 clap = { version = "4", features = ["derive", "env"] }
+
 # HMAC
 hmac = "0.12"
 sha2 = "0.10"
+
 # Random
 rand = "0.8"
+
 # Hex encoding
 hex = "0.4"

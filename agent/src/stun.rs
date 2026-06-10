@@ -116,7 +116,7 @@ pub async fn detect_nat_type(servers: &[String], timeout: std::time::Duration) -
     let first = query_from_conn(&socket, &servers[0], timeout).await;
     let second = query_from_conn(&socket, &servers[1], timeout).await;
 
-    match (first, second) {
+    match (&first, &second) {
         (Ok(a), Ok(b)) => {
             if a.public_port != b.public_port {
                 tracing::info!("symmetric NAT detected: port {} vs {}", a.public_port, b.public_port);
@@ -127,8 +127,8 @@ pub async fn detect_nat_type(servers: &[String], timeout: std::time::Duration) -
             }
         }
         _ => {
-            tracing::warn!("NAT detection failed, falling back to single STUN");
-            if let Ok(r) = first.or(second) {
+            let fallback = first.as_ref().ok().or(second.as_ref().ok());
+            if let Some(r) = fallback {
                 tracing::info!("single STUN result: {}:{}", r.public_ip, r.public_port);
             }
             NatType::Unknown

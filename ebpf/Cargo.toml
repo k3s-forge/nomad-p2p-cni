@@ -7,7 +7,6 @@ authors = { workspace = true }
 
 [dependencies]
 aya-ebpf = "0.1"
-aya-log-ebpf = "0.1"
 nomad-p2p-common = { path = "../common" }
 
 [lib]

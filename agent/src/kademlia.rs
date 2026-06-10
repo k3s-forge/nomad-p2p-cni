@@ -22,7 +22,7 @@ pub struct P2pNetwork {
     pub swarm: swarm::Swarm<P2pBehaviour>,
 }
 
-#[derive(NetworkBehaviour)]
+#[derive(libp2p::swarm::NetworkBehaviour)]
 pub struct P2pBehaviour {
     pub kademlia: kad::Behaviour<kad::store::MemoryStore>,
     pub gossipsub: gossipsub::Behaviour,

@@ -5,8 +5,6 @@ use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use nomad_p2p_common::NatType;
-
 use crate::AgentState;
 use crate::protocol::UdpProtocol;
 
@@ -41,7 +39,7 @@ pub struct NodeRegistration {
     pub public_port: u16,
     pub subnet: String,
     pub relay_capable: bool,
-    pub nat_type: NatType,
+    pub nat_type: u8,
 }
 
 #[derive(Clone)]
@@ -86,7 +84,7 @@ impl SeedClient {
                 public_port,
                 subnet: state.cfg.read().await.node_subnet.clone(),
                 relay_capable: false,
-                nat_type,
+                nat_type: nat_type as u8,
             }),
             query_ip: None,
             nodes: None,

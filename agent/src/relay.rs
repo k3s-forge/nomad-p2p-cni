@@ -52,7 +52,7 @@ async fn query_seed_for_relay(
 
     let socket = UdpSocket::bind("0.0.0.0:0").await.ok()?;
     let mut buf = vec![0u8; 2048];
-    let _ = tokio::time::timeout(Duration::from_secs(3), socket.recv(&mut buf)).await?;
+    let _ = tokio::time::timeout(Duration::from_secs(3), socket.recv(&mut buf)).await.ok()?;
 
     if let Ok(response) = serde_json::from_slice::<Message>(&buf) {
         if let Some(relay) = response.relay {
@@ -61,6 +61,7 @@ async fn query_seed_for_relay(
                     public_ip: u32::from(ip),
                     port: relay.relay_port,
                     nat_type: NatType::Unknown as u8,
+                    _pad: 0,
                 });
             }
         }

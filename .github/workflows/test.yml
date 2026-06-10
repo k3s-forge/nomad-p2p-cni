@@ -70,11 +70,11 @@ jobs:
           docker exec test-node ss -ulnp | grep ":9527" && echo "Port 9527 OK" || echo "Port 9527 NOT listening"
 
           echo ""
-          echo "=== Test 5: Nomad ==="
+          echo "=== Test 4: Nomad ==="
           docker exec test-node nomad status 2>/dev/null || echo "Nomad check skipped"
 
           echo ""
-          echo "=== Test 6: Deploy test job ==="
+          echo "=== Test 5: Deploy test job ==="
           docker exec test-node bash -c 'cat > /tmp/test.nomad <<JOB
 job "test" {
   datacenters = ["dc1"]
@@ -90,7 +90,7 @@ JOB
 nomad job run /tmp/test.nomad 2>&1' || echo "Job deploy check"
 
           echo ""
-          echo "=== Test 7: Check allocations ==="
+          echo "=== Test 6: Check allocations ==="
           sleep 3
           docker exec test-node nomad job status test 2>/dev/null || echo "Alloc check skipped"
 

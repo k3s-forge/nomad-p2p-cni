@@ -1,0 +1,6 @@
+/target
+/bin/
+*.o
+*.so
+Cargo.lock
+.gitignore

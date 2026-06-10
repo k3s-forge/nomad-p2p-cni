@@ -1,0 +1,20 @@
+[package]
+name = "nomad-p2p-ebpf"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+
+[dependencies]
+aya-ebpf = "0.13"
+aya-log-ebpf = "0.13"
+nomad-p2p-common = { path = "../common" }
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

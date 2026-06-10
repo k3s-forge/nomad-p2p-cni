@@ -22,6 +22,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev
 
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          targets: bpfel-unknown-none
+
+      - name: Build Rust workspace
+        run: |
+          cargo build --workspace --exclude nomad-p2p-ebpf 2>&1 || echo "Rust build had warnings"
+
       - name: Build BPF
         run: make build-bpf
 

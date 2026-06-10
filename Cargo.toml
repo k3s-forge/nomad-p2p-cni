@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "common",
+    "ebpf",
+    "agent",
+    "cni",
+]
+
+[workspace.package]
+version = "0.4.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+authors = ["nomad-p2p-cni contributors"]
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.38", features = ["full", "rt-multi-thread", "macros"] }
+# eBPF framework
+aya = { version = "0.13", features = ["derive", "maps", "programs", "tc", "cgroup", "ringbuf", "async"] }
+aya-log = "0.13"
+# P2P networking
+libp2p = { version = "0.54", features = ["kad", "gossipsub", "tokio", "noise", "yamux", "dns", "identify", "ping", "tcp", "quic"] }
+# Config hot-reload
+notify = { version = "6.1", features = ["tokio"] }
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Networking
+socket2 = "0.5"
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# Utilities
+anyhow = "1.0"
+thiserror = "1.0"
+clap = { version = "4.4", features = ["derive", "env"] }
+# CNI
+cni = "0.13"
+# HMAC
+hmac = "0.12"
+sha2 = "0.10"
+# Random
+rand = "0.8"

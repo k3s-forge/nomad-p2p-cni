@@ -1,0 +1,12 @@
+[package]
+name = "xtask"
+version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+
+[package.metadata.docs.rs]
+all-features = true

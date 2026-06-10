@@ -1,0 +1,21 @@
+[package]
+name = "nomad-p2p-cni"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lib]
+name = "nomad_p2p_cni"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nomad-p2p-cni"
+path = "src/main.rs"

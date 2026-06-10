@@ -22,18 +22,25 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev
 
-      - name: Set up Rust
+      - name: Set up Rust (stable + nightly for eBPF)
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: stable
+          toolchain: nightly
+          components: rust-src
           targets: bpfel-unknown-none
 
-      - name: Build Rust workspace
+      - name: Build Rust workspace (userspace)
         run: |
           cargo build --workspace --exclude nomad-p2p-ebpf 2>&1 || echo "Rust build had warnings"
 
-      - name: Build BPF
-        run: make build-bpf
+      - name: Build Rust eBPF (bpfel-unknown-none)
+        continue-on-error: true
+        id: rust-ebpf
+        run: |
+          cargo run --package xtask -- build-ebpf 2>&1
+
+      - name: Build C BPF (for cluster tests)
+        run: make build-bpf 2>&1
 
       - name: Build binary
         run: |

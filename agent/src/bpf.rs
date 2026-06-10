@@ -104,6 +104,20 @@ impl BpfManager {
         Ok(())
     }
 
+    pub fn update_container_route(&self, container_ip: u32, route_vni: u32) -> Result<()> {
+        if let Some(ref map) = self.maps.container_route {
+            map.insert(&container_ip, &route_vni, 0)?;
+        }
+        Ok(())
+    }
+
+    pub fn remove_container_route(&self, container_ip: u32) -> Result<()> {
+        if let Some(ref map) = self.maps.container_route {
+            map.remove(&container_ip)?;
+        }
+        Ok(())
+    }
+
     pub fn attach_all(&mut self, ifindex: u32) -> Result<()> {
         self.attach_xdp(ifindex)?;
         self.attach_tc(ifindex, "egress")?;

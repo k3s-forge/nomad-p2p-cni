@@ -1,3 +1,4 @@
+pub mod api;
 pub mod bpf;
 pub mod kademlia;
 pub mod metrics;

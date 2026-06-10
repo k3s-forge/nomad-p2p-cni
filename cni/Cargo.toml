@@ -9,8 +9,7 @@ authors = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+ureq = "2.9"
 
 [lib]
 name = "nomad_p2p_cni"

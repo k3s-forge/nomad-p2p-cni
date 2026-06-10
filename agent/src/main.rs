@@ -91,13 +91,14 @@ async fn run_agent(config_path: &str, seed_mode: bool) -> Result<()> {
     let seed_client = Arc::new(tokio::sync::Mutex::new(seed_client));
 
     let route_mgr = Arc::new(route::RouteManager::new());
+    let container_mgr = api::ContainerManager::new();
 
     let seed_addrs = state.cfg.seeds.iter().map(|s| s.addr.clone()).collect::<Vec<_>>();
     let p2p = kademlia::build_p2p(&state, &seed_addrs).await.ok();
 
     let stop = Arc::new(AtomicBool::new(false));
 
-    spawn_tasks(&state, &bpf, &proto, &seed_client, &route_mgr, p2p, &stop).await;
+    spawn_tasks(&state, &bpf, &proto, &seed_client, &route_mgr, container_mgr, p2p, &stop).await;
 
     tokio::signal::ctrl_c().await.ok();
     tracing::info!("shutting down...");
@@ -113,6 +114,7 @@ async fn spawn_tasks(
     proto: &Arc<tokio::sync::Mutex<protocol::UdpProtocol>>,
     seed_client: &Arc<tokio::sync::Mutex<seed::SeedClient>>,
     route_mgr: &Arc<route::RouteManager>,
+    container_mgr: api::ContainerManager,
     p2p: Option<kademlia::P2pNetwork>,
     stop: &Arc<AtomicBool>,
 ) {
@@ -125,6 +127,14 @@ async fn spawn_tasks(
             stop.clone(),
         ));
     }
+
+    // CNI API server for container management
+    tokio::spawn(api::api_server(
+        container_mgr,
+        bpf.clone(),
+        9091,
+        stop.clone(),
+    ));
 
     let refresh = state.cfg.stun_refresh_interval;
     tokio::spawn(stun::refresh_loop(

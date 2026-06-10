@@ -24,6 +24,8 @@ jobs:
           components: rust-src
 
       - name: Build workspace (userspace)
+        env:
+          RUSTFLAGS: ""
         run: cargo build --workspace --exclude nomad-p2p-ebpf 2>&1
 
       - name: Build eBPF (bpfel-unknown-none via build-std)

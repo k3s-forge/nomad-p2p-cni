@@ -77,7 +77,7 @@ echo "[5/5] Running verification tests..."
 
 # Test: All agents alive
 for c in $SEED容器 $NODE1容器 $NODE2容器; do
-    if docker exec $c pgrep -f "nomad-p2p" >/dev/null 2>&1; then
+    if docker exec $c pgrep -f "nomad-p2p-agent-rust" >/dev/null 2>&1; then
         check "$c agent alive" "pass"
     else
         check "$c agent alive" "fail"

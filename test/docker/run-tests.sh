@@ -17,14 +17,14 @@ test_result() {
 }
 
 echo "--- Test 1: Binary runs ---"
-if nomad-p2p version 2>/dev/null; then
-  test_result "nomad-p2p version" "pass"
+if nomad-p2p-agent-rust Version 2>/dev/null; then
+  test_result "nomad-p2p-agent-rust version" "pass"
 else
-  test_result "nomad-p2p version" "fail"
+  test_result "nomad-p2p-agent-rust version" "fail"
 fi
 
 echo "--- Test 2: Agent process alive ---"
-if pgrep -f "nomad-p2p agent" >/dev/null; then
+if pgrep -f "nomad-p2p-agent-rust Agent" >/dev/null; then
   test_result "agent process running" "pass"
 else
   test_result "agent process running" "fail"

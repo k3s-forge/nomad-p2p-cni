@@ -28,22 +28,22 @@ EOF
 
 case "$MODE" in
     seed)
-        echo "[1/2] Starting nomad-p2p seed agent..."
-        nomad-p2p agent --config /tmp/agent.json --seed-mode &
+        echo "[1/2] Starting nomad-p2p seed agent (Rust)..."
+        nomad-p2p-agent-rust Seed --config /tmp/agent.json &
         AGENT_PID=$!
         echo "Seed agent started (PID: $AGENT_PID)"
         wait $AGENT_PID
         ;;
     agent)
-        echo "[1/2] Starting nomad-p2p agent..."
-        nomad-p2p agent --config /tmp/agent.json &
+        echo "[1/2] Starting nomad-p2p agent (Rust)..."
+        nomad-p2p-agent-rust Agent --config /tmp/agent.json &
         AGENT_PID=$!
         echo "Agent started (PID: $AGENT_PID)"
         wait $AGENT_PID
         ;;
     server)
-        echo "[1/3] Starting nomad-p2p seed agent..."
-        nomad-p2p agent --config /tmp/agent.json --seed-mode &
+        echo "[1/3] Starting nomad-p2p seed agent (Rust)..."
+        nomad-p2p-agent-rust Seed --config /tmp/agent.json &
         AGENT_PID=$!
         sleep 2
 

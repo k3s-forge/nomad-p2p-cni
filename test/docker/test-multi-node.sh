@@ -86,21 +86,21 @@ check() {
 }
 
 # Test: seed agent running
-if docker exec $SEED容器 pgrep -f "nomad-p2p agent" >/dev/null 2>&1; then
+if docker exec $SEED容器 pgrep -f "nomad-p2p-agent-rust Seed" >/dev/null 2>&1; then
     check "seed agent running" "pass"
 else
     check "seed agent running" "fail"
 fi
 
 # Test: node1 agent running
-if docker exec $NODE1容器 pgrep -f "nomad-p2p agent" >/dev/null 2>&1; then
+if docker exec $NODE1容器 pgrep -f "nomad-p2p-agent-rust Agent" >/dev/null 2>&1; then
     check "node1 agent running" "pass"
 else
     check "node1 agent running" "fail"
 fi
 
 # Test: node2 agent running
-if docker exec $NODE2容器 pgrep -f "nomad-p2p agent" >/dev/null 2>&1; then
+if docker exec $NODE2容器 pgrep -f "nomad-p2p-agent-rust Agent" >/dev/null 2>&1; then
     check "node2 agent running" "pass"
 else
     check "node2 agent running" "fail"
@@ -135,7 +135,7 @@ else
 fi
 
 # Test: node1 binary version
-VERSION=$(docker exec $NODE1容器 nomad-p2p version 2>/dev/null || echo "")
+VERSION=$(docker exec $NODE1容器 nomad-p2p-agent-rust Version 2>/dev/null || echo "")
 if echo "$VERSION" | grep -q "nomad-p2p"; then
     check "node1 version: $VERSION" "pass"
 else

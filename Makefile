@@ -1,24 +1,24 @@
-.PHONY: all build-bpf build-bin clean
+.PHONY: all build-bpf build-bin clean build-ebpf build-agent build-cni
 
-CLANG ?= clang
 BIN_DIR := bin
 
-all: build-bpf build-bin
-
-build-bpf: $(BIN_DIR)
-	$(CLANG) -O2 -g -Wall -target bpf -I/usr/include -I/usr/include/x86_64-linux-gnu \
-		-c bpf/mesh.bpf.c -o $(BIN_DIR)/mesh.bpf.o
-	$(CLANG) -O2 -g -Wall -target bpf -I/usr/include -I/usr/include/x86_64-linux-gnu \
-		-c bpf/vip_balancer.bpf.c -o $(BIN_DIR)/vip_balancer.bpf.o
-	$(CLANG) -O2 -g -Wall -target bpf -I/usr/include -I/usr/include/x86_64-linux-gnu \
-		-c bpf/firewall.bpf.c -o $(BIN_DIR)/firewall.bpf.o
+all: build-ebpf build-agent
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
 
-build-bin:
-	CGO_ENABLED=0 go build -o $(BIN_DIR)/nomad-p2p ./cmd/nomad-p2p
+build-ebpf: $(BIN_DIR)
+	cargo xtask build-ebpf 2>&1
+
+build-agent:
+	cargo build --release --package nomad-p2p-agent 2>&1
+
+build-cni:
+	cargo build --release --package nomad-p2p-cni 2>&1
+
+build-bin: build-agent build-cni
+	cp target/release/nomad-p2p-agent $(BIN_DIR)/
+	cp target/release/nomad-p2p-cni $(BIN_DIR)/
 
 clean:
-	rm -rf $(BIN_DIR)
-	go clean
+	rm -rf $(BIN_DIR) target

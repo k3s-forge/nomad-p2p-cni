@@ -5,5 +5,8 @@ edition = { workspace = true }
 license = { workspace = true }
 authors = { workspace = true }
 
+[dependencies]
+aya = { workspace = true }
+
 [package.metadata.docs.rs]
 all-features = true

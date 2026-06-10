@@ -1,4 +1,3 @@
-#![no_std]
 
 pub const HMAC_SIZE: usize = 32;
 pub const HEADER_SIZE: usize = 16;
@@ -70,3 +69,10 @@ pub enum AclAction {
     Allow = 1,
     Deny = 2,
 }
+
+// Safety: #[repr(C)] plain-old-data types for BPF map storage
+unsafe impl aya::Pod for PeerEndpoint {}
+unsafe impl aya::Pod for VipBackend {}
+unsafe impl aya::Pod for VipInfo {}
+unsafe impl aya::Pod for TunnelCfg {}
+unsafe impl aya::Pod for AclRule {}

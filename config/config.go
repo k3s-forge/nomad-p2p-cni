@@ -22,6 +22,9 @@ type Config struct {
 	ListenPort          int      `json:"listen_port"`
 	StunRefreshInterval int      `json:"stun_refresh_interval"`
 
+	LazyDiscovery       bool `json:"lazy_discovery"`
+	RouteMissMaxPending int  `json:"route_miss_max_pending"`
+
 	IPsecEnabled bool   `json:"ipsec_enabled"`
 	IPsecSPI     uint32 `json:"ipsec_spi"`
 	IPsecKey     string `json:"ipsec_key"`
@@ -108,6 +111,9 @@ func (c *Config) Validate() error {
 	}
 	if c.DefaultPolicy == "" {
 		c.DefaultPolicy = "allow"
+	}
+	if c.RouteMissMaxPending == 0 {
+		c.RouteMissMaxPending = 256
 	}
 	if c.MetricsPort == 0 {
 		c.MetricsPort = 9090

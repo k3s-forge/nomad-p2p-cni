@@ -48,6 +48,8 @@ type Agent struct {
 	bpfLinks   []link.Link
 	startTime  time.Time
 	metrics    *metricsCollector
+	routeMissPending map[string]time.Time
+	routeMissMu     sync.Mutex
 }
 
 func newAgent(cfg *config.Config, configPath string, seedMode bool) (*Agent, error) {
@@ -66,6 +68,7 @@ func newAgent(cfg *config.Config, configPath string, seedMode bool) (*Agent, err
 		startTime:  time.Now(),
 		metrics:    newMetricsCollector(),
 		natType:    NATUnknown,
+		routeMissPending: make(map[string]time.Time),
 	}, nil
 }
 

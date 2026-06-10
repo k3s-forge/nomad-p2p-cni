@@ -14,6 +14,8 @@
   ],
   "listen_port": 9527,
   "stun_refresh_interval": 120,
+  "lazy_discovery": true,
+  "route_miss_max_pending": 256,
   "ipsec_enabled": false,
   "ipsec_spi": 4096,
   "ipsec_key": "0123456789abcdef0123456789abcdef",

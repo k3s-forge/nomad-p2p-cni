@@ -126,7 +126,6 @@ func (a *Agent) handleQuery(msg Message, remote net.Addr) {
 }
 
 func (a *Agent) handleQueryResponse(msg Message) {
-	// Check if this is a relayed response
 	if msg.QueryID != "" {
 		a.registry.relayMu.Lock()
 		origAddr, ok := a.registry.relayPending[msg.QueryID]
@@ -152,6 +151,10 @@ func (a *Agent) handleQueryResponse(msg Message) {
 
 		ep := NodeEndpoint{PublicIP: publicU, PublicPort: uint16(node.PublicPort)}
 		a.maps.NodeDynamicMap.Update(overlayU, ep, 0)
+
+		a.routeMissMu.Lock()
+		delete(a.routeMissPending, node.OverlayIP)
+		a.routeMissMu.Unlock()
 
 		a.mu.Lock()
 		a.peerBook[overlayU] = &PeerInfo{
@@ -205,11 +208,11 @@ func (a *Agent) handleRelayRequest(msg Message, remote net.Addr) {
 
 func (a *Agent) bootstrapFromSeeds() {
 	for _, seed := range a.cfg.Seeds {
-		go a.querySeed(seed.Addr)
+		go a.registerWithSeed(seed.Addr)
 	}
 }
 
-func (a *Agent) querySeed(addr string) {
+func (a *Agent) registerWithSeed(addr string) {
 	udpAddr, err := net.ResolveUDPAddr("udp4", addr)
 	if err != nil {
 		return
@@ -231,7 +234,10 @@ func (a *Agent) querySeed(addr string) {
 		NATType:      string(a.natType),
 	}
 	a.sendToSeed(conn, Message{Type: "register", NodeInfo: &reg})
-	a.sendToSeed(conn, Message{Type: "query"})
+
+	if !a.cfg.LazyDiscovery {
+		a.sendToSeed(conn, Message{Type: "query"})
+	}
 }
 
 func (a *Agent) registerSelf() {
@@ -282,6 +288,15 @@ func (a *Agent) peerHealthLoop() {
 		case <-ticker.C:
 			a.registry.cleanup()
 
+			a.routeMissMu.Lock()
+			now := time.Now()
+			for ip, t := range a.routeMissPending {
+				if now.Sub(t) > time.Minute {
+					delete(a.routeMissPending, ip)
+				}
+			}
+			a.routeMissMu.Unlock()
+
 			a.mu.RLock()
 			stalePeers := make([]uint32, 0)
 			for overlayIP, peer := range a.peerBook {
@@ -290,8 +305,8 @@ func (a *Agent) peerHealthLoop() {
 					stalePeers = append(stalePeers, overlayIP)
 					continue
 				}
-				if time.Since(peer.PingLastSuccess) > 3*time.Minute {
-					go a.pingPeer(overlayIP, peer)
+				if peer.PingOK && time.Since(peer.PingLastSuccess) > 5*time.Minute {
+					stalePeers = append(stalePeers, overlayIP)
 				}
 			}
 			a.mu.RUnlock()

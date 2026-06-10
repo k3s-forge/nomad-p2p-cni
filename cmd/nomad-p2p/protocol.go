@@ -217,17 +217,36 @@ func (a *Agent) consumeRouteMiss() {
 		}
 		missedIP := make(net.IP, 4)
 		binary.BigEndian.PutUint32(missedIP, binary.BigEndian.Uint32(record.RawSample[:4]))
+
+		ipStr := missedIP.String()
+		now := time.Now()
+
+		a.routeMissMu.Lock()
+		lastSeen, exists := a.routeMissPending[ipStr]
+		if exists && now.Sub(lastSeen) < 5*time.Second {
+			a.routeMissMu.Unlock()
+			continue
+		}
+		if len(a.routeMissPending) > a.cfg.RouteMissMaxPending {
+			for k := range a.routeMissPending {
+				delete(a.routeMissPending, k)
+				break
+			}
+		}
+		a.routeMissPending[ipStr] = now
+		a.routeMissMu.Unlock()
+
 		log.Printf("[agent] route miss for %s", missedIP)
 		a.metrics.inc("route_misses")
 
 		a.mu.RLock()
 		for addr := range a.seedConns {
-			a.queryNodeFromSeed(addr, missedIP.String())
+			a.queryNodeFromSeed(addr, ipStr)
 		}
 		a.mu.RUnlock()
 
 		if a.natType == NATSymmetric {
-			a.tryRelayForTarget(missedIP.String())
+			a.tryRelayForTarget(ipStr)
 		}
 	}
 }

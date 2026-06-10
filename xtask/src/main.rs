@@ -40,6 +40,7 @@ fn build_ebpf() -> Result<()> {
     println!("building eBPF programs...");
     let status = Command::new("cargo")
         .args([
+            "+nightly",
             "build", "--package", "nomad-p2p-ebpf",
             "--target", "bpfel-unknown-none",
             "--release",
@@ -50,7 +51,6 @@ fn build_ebpf() -> Result<()> {
     if !status.success() {
         anyhow::bail!("eBPF build failed");
     }
-    // Copy .o files to bin/
     let _ = std::fs::create_dir_all("bin");
     let src = "target/bpfel-unknown-none/release/nomad-p2p-ebpf";
     let dst = "bin/mesh.bpf.o";
@@ -58,9 +58,6 @@ fn build_ebpf() -> Result<()> {
         Ok(_) => println!("copied {} -> {}", src, dst),
         Err(e) => println!("copy failed: {}", e),
     }
-    // Also install the combined .o files for each BPF program
-    // (In a full setup, xtask would split the ELF sections into separate .o files)
-    // For now, mesh.bpf.o contains all programs (classifier + cgroup_connect4 + xdp)
     Ok(())
 }
 

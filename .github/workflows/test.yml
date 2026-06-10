@@ -31,7 +31,7 @@ jobs:
 
       - name: Build eBPF
         run: |
-          cargo run --package xtask -- build-ebpf 2>&1
+          cargo +nightly run --package xtask -- build-ebpf 2>&1
 
       - name: Build release binaries
         run: |

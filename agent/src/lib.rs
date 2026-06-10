@@ -3,6 +3,7 @@ pub mod metrics;
 pub mod protocol;
 pub mod relay;
 pub mod reload;
+pub mod route;
 pub mod seed;
 pub mod stun;
 pub mod vip;

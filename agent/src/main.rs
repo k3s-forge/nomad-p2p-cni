@@ -68,13 +68,15 @@ async fn run_agent(config_path: &str, seed_mode: bool) -> Result<()> {
     let state = Arc::new(AgentState::new(cfg));
     tracing::info!("starting agent (seed_mode={})", seed_mode);
 
-    let mut bpf = bpf::BpfManager::load()
-        .context("load BPF programs")?;
-    bpf.set_tunnel_cfg(state.cfg.tunnel_vni)?;
-
-    let ifindex = bpf::find_default_ifindex().await
-        .unwrap_or(1);
-    bpf.attach_all(ifindex)?;
+    let bpf = {
+        let mut bpf = bpf::BpfManager::load()
+            .context("load BPF programs")?;
+        bpf.set_tunnel_cfg(state.cfg.tunnel_vni)?;
+        let ifindex = bpf::find_default_ifindex().await
+            .unwrap_or(1);
+        bpf.attach_all(ifindex)?;
+        Arc::new(std::sync::Mutex::new(bpf))
+    };
 
     stun::discover(&state).await?;
 
@@ -88,9 +90,11 @@ async fn run_agent(config_path: &str, seed_mode: bool) -> Result<()> {
     seed_client.register_all().await;
     let seed_client = Arc::new(tokio::sync::Mutex::new(seed_client));
 
+    let route_mgr = Arc::new(route::RouteManager::new());
+
     let stop = Arc::new(AtomicBool::new(false));
 
-    spawn_tasks(&state, &bpf, &proto, &seed_client, &stop).await;
+    spawn_tasks(&state, &bpf, &proto, &seed_client, &route_mgr, &stop).await;
 
     tokio::signal::ctrl_c().await.ok();
     tracing::info!("shutting down...");
@@ -102,12 +106,13 @@ async fn run_agent(config_path: &str, seed_mode: bool) -> Result<()> {
 
 async fn spawn_tasks(
     state: &Arc<AgentState>,
-    bpf: &bpf::BpfManager,
+    bpf: &Arc<std::sync::Mutex<bpf::BpfManager>>,
     proto: &Arc<tokio::sync::Mutex<protocol::UdpProtocol>>,
     seed_client: &Arc<tokio::sync::Mutex<seed::SeedClient>>,
+    route_mgr: &Arc<route::RouteManager>,
     stop: &Arc<AtomicBool>,
 ) {
-    let _ = (bpf, proto, seed_client, stop);
+    let _ = (proto, seed_client);
 
     if state.cfg.metrics_port > 0 {
         tokio::spawn(metrics::serve(
@@ -122,6 +127,20 @@ async fn spawn_tasks(
     tokio::spawn(stun::refresh_loop(
         state.clone(),
         refresh,
+        stop.clone(),
+    ));
+
+    // Route miss ringbuf consumer (reads BPF ringbuf via spawn_blocking)
+    tokio::spawn(route::ringbuf_consumer(
+        route_mgr.clone(),
+        bpf.clone(),
+        stop.clone(),
+    ));
+
+    // Lazy route discovery with batch drain + cooldown
+    tokio::spawn(route::discovery_loop(
+        state.clone(),
+        route_mgr.clone(),
         stop.clone(),
     ));
 }

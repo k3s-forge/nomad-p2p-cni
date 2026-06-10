@@ -51,6 +51,13 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Build Rust release binary (agent + CNI)
+        run: |
+          cargo build --release --package nomad-p2p-agent --package nomad-p2p-cni 2>&1
+          cp target/release/nomad-p2p-agent bin/nomad-p2p-agent-rust 2>/dev/null || true
+          cp target/release/nomad-p2p-cni bin/nomad-p2p-cni-rust 2>/dev/null || true
+          ls -la bin/
+
       - name: Upload
         uses: actions/upload-artifact@v4
         with:

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
@@ -58,11 +59,7 @@ impl SeedClient {
     }
 
     pub async fn register_all(&mut self) {
-        let state = Arc::new(AgentState::new(
-            nomad_p2p_common::Config::default()
-        ));
-        let _ = state;
-        // TODO: connect to seeds and register
+        // TODO: connect to seeds and register with AgentConfig
     }
 
     pub async fn register(&self, state: &Arc<AgentState>, addr: &str) {
@@ -128,16 +125,14 @@ fn ts_now() -> u64 {
 pub async fn health_loop(
     state: Arc<AgentState>,
     _client: SeedClient,
-    mut stop: tokio::sync::watch::Receiver<bool>,
+    stop: Arc<AtomicBool>,
 ) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
     loop {
-        tokio::select! {
-            _ = stop.changed() => return,
-            _ = interval.tick() => {
-                let _ = &state;
-                tracing::trace!("health check tick");
-            }
-        }
+        if stop.load(Ordering::SeqCst) { return; }
+        interval.tick().await;
+        if stop.load(Ordering::SeqCst) { return; }
+        let _ = &state;
+        tracing::trace!("health check tick");
     }
 }

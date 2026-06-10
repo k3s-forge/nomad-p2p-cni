@@ -3,9 +3,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use serde::Serialize;
 use tokio::net::UdpSocket;
 
-use nomad_p2p_common::{Message, HEADER_SIZE, HMAC_SIZE, MIN_MESSAGE_SIZE, REPLAY_WINDOW_SECS};
+use nomad_p2p_common::{HEADER_SIZE, HMAC_SIZE, MIN_MESSAGE_SIZE, REPLAY_WINDOW_SECS};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -25,7 +26,7 @@ impl UdpProtocol {
         })
     }
 
-    pub fn marshal(&self, msg: &Message) -> Vec<u8> {
+    pub fn marshal(&self, msg: &impl Serialize) -> Vec<u8> {
         let payload = serde_json::to_vec(msg).unwrap_or_default();
 
         let now = SystemTime::now()
@@ -112,7 +113,7 @@ impl UdpProtocol {
         }
     }
 
-    pub async fn send_to(&self, msg: &Message, addr: &std::net::SocketAddr) -> Result<()> {
+    pub async fn send_to(&self, msg: &impl Serialize, addr: &std::net::SocketAddr) -> Result<()> {
         let data = self.marshal(msg);
         self.socket.send_to(&data, addr).await?;
         Ok(())

@@ -1,8 +1,8 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use tokio::net::UdpSocket;
-use tokio::sync::watch;
 
 use nomad_p2p_common::NatType;
 
@@ -162,13 +162,14 @@ pub async fn discover(state: &Arc<AgentState>) -> Result<()> {
 pub async fn refresh_loop(
     state: Arc<AgentState>,
     interval_secs: u64,
-    mut stop: watch::Receiver<bool>,
+    stop: Arc<AtomicBool>,
 ) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
     loop {
+        if stop.load(Ordering::SeqCst) { return; }
         tokio::select! {
-            _ = stop.changed() => return,
             _ = interval.tick() => {
+                if stop.load(Ordering::SeqCst) { return; }
                 let old_ip = *state.public_ip.read().await;
                 let old_port = *state.public_port.read().await;
                 discover(&state).await.ok();

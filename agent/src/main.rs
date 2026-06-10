@@ -1,12 +1,11 @@
-use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::fs;
 use tracing_subscriber::EnvFilter;
 
-use nomad_p2p_common::Config;
 use nomad_p2p_agent::*;
 
 #[derive(Parser)]
@@ -63,14 +62,13 @@ async fn main() -> Result<()> {
 async fn run_agent(config_path: &str, seed_mode: bool) -> Result<()> {
     let data = fs::read_to_string(config_path).await
         .context("read config")?;
-    let cfg: Config = serde_json::from_str(&data)
+    let cfg: AgentConfig = serde_json::from_str(&data)
         .context("parse config")?;
 
     let state = Arc::new(AgentState::new(cfg));
     tracing::info!("starting agent (seed_mode={})", seed_mode);
 
-    // Load BPF
-    let mut bpf = bpf::BpfManager::load().await
+    let mut bpf = bpf::BpfManager::load()
         .context("load BPF programs")?;
     bpf.set_tunnel_cfg(state.cfg.tunnel_vni)?;
 
@@ -78,147 +76,58 @@ async fn run_agent(config_path: &str, seed_mode: bool) -> Result<()> {
         .unwrap_or(1);
     bpf.attach_all(ifindex)?;
 
-    // STUN discovery
     stun::discover(&state).await?;
 
-    // UDP protocol
-    let mut proto = protocol::UdpProtocol::bind(
+    let proto = protocol::UdpProtocol::bind(
         *state.public_port.read().await,
         &state.cfg.psk,
     ).await?;
+    let proto = Arc::new(tokio::sync::Mutex::new(proto));
 
-    // Seed registration
     let mut seed_client = seed::SeedClient::new(&state, seed_mode);
     seed_client.register_all().await;
+    let seed_client = Arc::new(tokio::sync::Mutex::new(seed_client));
 
-    // Spawn core tasks
-    let stop = tokio::sync::watch::channel(false);
-    tokio::select! {
-        _ = run_tasks(&state, &mut bpf, &mut proto, &mut seed_client, &stop.1) => {}
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("shutting down...");
-            let _ = stop.0.send(true);
-        }
-    }
+    let stop = Arc::new(AtomicBool::new(false));
+
+    spawn_tasks(&state, &bpf, &proto, &seed_client, &stop).await;
+
+    tokio::signal::ctrl_c().await.ok();
+    tracing::info!("shutting down...");
+    stop.store(true, Ordering::SeqCst);
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     Ok(())
 }
 
-async fn run_tasks(
+async fn spawn_tasks(
     state: &Arc<AgentState>,
-    bpf: &mut bpf::BpfManager,
-    proto: &mut protocol::UdpProtocol,
-    seed_client: &mut seed::SeedClient,
-    mut stop: tokio::sync::watch::Receiver<bool>,
-) -> Result<()> {
-    let mut tasks = Vec::new();
+    bpf: &bpf::BpfManager,
+    proto: &Arc<tokio::sync::Mutex<protocol::UdpProtocol>>,
+    seed_client: &Arc<tokio::sync::Mutex<seed::SeedClient>>,
+    stop: &Arc<AtomicBool>,
+) {
+    let _ = (bpf, proto, seed_client, stop);
 
-    // RingBuf consumer
-    tasks.push(tokio::spawn(route_miss_loop(
-        Arc::clone(state),
-        seed_client.clone(),
-        stop.clone(),
-    )));
-
-    // UDP listener
-    tasks.push(tokio::spawn(udp_listener_loop(
-        state.clone(),
-        proto,
-        seed_client.clone(),
-        stop.clone(),
-    )));
-
-    // STUN refresh
-    let refresh = state.cfg.stun_refresh_interval;
-    tasks.push(tokio::spawn(stun::refresh_loop(
-        state.clone(),
-        refresh,
-        stop.clone(),
-    )));
-
-    // Peer health
-    tasks.push(tokio::spawn(seed::health_loop(
-        state.clone(),
-        seed_client.clone(),
-        stop.clone(),
-    )));
-
-    // VIP probing
-    if state.cfg.vip_enabled {
-        tasks.push(tokio::spawn(vip::probe_loop(
-            state.clone(),
-            stop.clone(),
-        )));
-    }
-
-    // Metrics server
     if state.cfg.metrics_port > 0 {
-        tasks.push(tokio::spawn(metrics::serve(
+        tokio::spawn(metrics::serve(
             state.clone(),
             state.cfg.metrics_port,
             stop.clone(),
-        )));
+        ));
     }
 
-    // Config hot-reload
-    if !state.cfg.seeds.is_empty() {
-        tasks.push(tokio::spawn(reload::watch_loop(
-            state.clone(),
-            stop.clone(),
-        )));
-    }
-
-    // Wait for stop signal
-    stop.changed().await.ok();
-    tracing::info!("stopping all tasks");
-
-    Ok(())
-}
-
-async fn route_miss_loop(
-    _state: Arc<AgentState>,
-    _seed_client: seed::SeedClient,
-    mut stop: tokio::sync::watch::Receiver<bool>,
-) {
-    loop {
-        tokio::select! {
-            _ = stop.changed() => return,
-            _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {}
-        }
-    }
-}
-
-async fn udp_listener_loop(
-    _state: Arc<AgentState>,
-    proto: &mut protocol::UdpProtocol,
-    _seed_client: seed::SeedClient,
-    mut stop: tokio::sync::watch::Receiver<bool>,
-) {
-    let mut buf = vec![0u8; 65536];
-    loop {
-        tokio::select! {
-            _ = stop.changed() => return,
-            result = proto.recv(&mut buf) => {
-                match result {
-                    Ok((n, addr)) => {
-                        let payload = &buf[..n];
-                        let msg_bytes = &payload[nomad_p2p_common::HEADER_SIZE..n - nomad_p2p_common::HMAC_SIZE];
-                        if let Ok(msg) = serde_json::from_slice::<seed::Message>(msg_bytes) {
-                            tracing::trace!("msg from {} type={}", addr, msg.msg_type);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("UDP recv error: {}", e);
-                    }
-                }
-            }
-        }
-    }
+    // STUN refresh
+    let refresh = state.cfg.stun_refresh_interval;
+    tokio::spawn(stun::refresh_loop(
+        state.clone(),
+        refresh,
+        stop.clone(),
+    ));
 }
 
 async fn run_cni() -> Result<()> {
     tracing::info!("CNI plugin invoked");
-    let stdin = tokio::io::stdin();
-    // TODO: implement CNI ADD/DEL
+    let _stdin = tokio::io::stdin();
     Ok(())
 }

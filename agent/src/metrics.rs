@@ -1,15 +1,15 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::net::SocketAddr;
 
 use tokio::io::AsyncWriteExt;
-use tokio::sync::watch;
 
 use crate::AgentState;
 
 pub async fn serve(
     state: Arc<AgentState>,
     port: u16,
-    mut stop: watch::Receiver<bool>,
+    stop: Arc<AtomicBool>,
 ) {
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
     let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -22,10 +22,13 @@ pub async fn serve(
     tracing::info!("metrics server on {}", port);
 
     loop {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+
         tokio::select! {
-            _ = stop.changed() => {
-                tracing::info!("metrics server stopped");
-                return;
+            _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                if stop.load(Ordering::SeqCst) { return; }
             }
             result = listener.accept() => {
                 if let Ok((mut stream, _)) = result {

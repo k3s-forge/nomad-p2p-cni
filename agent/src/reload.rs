@@ -1,21 +1,19 @@
+use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use notify::Watcher;
-use tokio::sync::watch;
+use notify::{DebouncedEvent, RecursiveMode, Watcher};
 
 use crate::AgentState;
 
 pub async fn watch_loop(
     state: Arc<AgentState>,
-    mut stop: watch::Receiver<bool>,
+    stop: Arc<AtomicBool>,
 ) {
-    let config_path = std::path::Path::new(&state.cfg.seeds[0].addr);
-    let _ = config_path;
+    let (tx, rx) = mpsc::channel();
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-    let mut watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        let _ = tx.blocking_send(res.map(|_| ()).map_err(|e| e.to_string()));
-    }) {
+    let mut watcher = match notify::watcher(tx, Duration::from_secs(2)) {
         Ok(w) => w,
         Err(e) => {
             tracing::warn!("file watcher not available: {}", e);
@@ -25,26 +23,26 @@ pub async fn watch_loop(
 
     if let Err(e) = watcher.watch(
         std::path::Path::new("/etc/nomad-p2p/config.json"),
-        notify::RecursiveMode::NonRecursive,
+        RecursiveMode::NonRecursive,
     ) {
         tracing::warn!("watch config failed: {}", e);
         return;
     }
 
     loop {
-        tokio::select! {
-            _ = stop.changed() => return,
-            Some(result) = rx.recv() => {
-                match result {
-                    Ok(()) => {
-                        tracing::info!("config file changed, reloading...");
-                        // TODO: reload config and update BPF maps
-                    }
-                    Err(e) => {
-                        tracing::warn!("watch error: {}", e);
-                    }
+        if stop.load(Ordering::SeqCst) { return; }
+
+        if let Ok(event) = rx.recv_timeout(Duration::from_millis(200)) {
+            match event {
+                DebouncedEvent::Write(_) | DebouncedEvent::Create(_) => {
+                    tracing::info!("config file changed, reloading...");
+                    let _ = &state;
+                    // TODO: reload config and update BPF maps
                 }
+                _ => {}
             }
         }
+
+        if stop.load(Ordering::SeqCst) { return; }
     }
 }

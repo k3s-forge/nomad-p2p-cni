@@ -1,16 +1,10 @@
 use anyhow::{Context, Result};
 use aya::{
-    programs::{CgroupAttachMode, CgroupSkbAttachType, Link, TcAttachType, Xdp, XdpFlags},
+    programs::{CgroupAttachMode, SchedClassifier, TcAttachType, Xdp, XdpFlags},
     Ebpf, EbpfLoader, MapData, maps::HashMap,
 };
 use nomad_p2p_common::{AclRule, PeerEndpoint, TunnelCfg, VipInfo};
-use std::{
-    net::Ipv4Addr,
-    os::fd::AsFd,
-    path::Path,
-    sync::Arc,
-};
-use tokio::sync::RwLock;
+use std::path::Path;
 
 pub struct BpfMaps {
     pub container_route: Option<HashMap<MapData, u32, u32>>,
@@ -28,7 +22,7 @@ pub struct BpfManager {
     pub fw: Option<Ebpf>,
     pub vip: Option<Ebpf>,
     pub maps: BpfMaps,
-    pub links: Vec<Box<dyn Link>>,
+    pub links: Vec<Box<dyn aya::programs::Link>>,
     pub pinned: bool,
 }
 
@@ -40,11 +34,11 @@ impl BpfManager {
         aya_log::EbpfLogger::init(&mut mesh).ok();
 
         let maps = BpfMaps {
-            container_route: mesh.take_map("CONTAINER_ROUTE_MAP").ok().map(|d| HashMap::new(d, 0).ok()).flatten(),
-            node_dynamic: mesh.take_map("NODE_DYNAMIC_MAP").ok().map(|d| HashMap::new(d, 0).ok()).flatten(),
-            route_miss_ringbuf: mesh.take_map("ROUTE_MISS_RINGBUF").ok().map(|d| aya::maps::RingBuf::new(d).ok()).flatten(),
-            geneve_ifindex: mesh.take_map("GENEVE_IFINDEX_MAP").ok().map(|d| HashMap::new(d, 0).ok()).flatten(),
-            tunnel_cfg: mesh.take_map("TUNNEL_CFG_MAP").ok().map(|d| HashMap::new(d, 0).ok()).flatten(),
+            container_route: mesh.take_map("CONTAINER_ROUTE_MAP").ok().and_then(|d| HashMap::new(d, 0).ok()),
+            node_dynamic: mesh.take_map("NODE_DYNAMIC_MAP").ok().and_then(|d| HashMap::new(d, 0).ok()),
+            route_miss_ringbuf: mesh.take_map("ROUTE_MISS_RINGBUF").ok().and_then(|d| aya::maps::RingBuf::new(d).ok()),
+            geneve_ifindex: mesh.take_map("GENEVE_IFINDEX_MAP").ok().and_then(|d| HashMap::new(d, 0).ok()),
+            tunnel_cfg: mesh.take_map("TUNNEL_CFG_MAP").ok().and_then(|d| HashMap::new(d, 0).ok()),
             vip_map: None,
             acl_map: None,
             default_policy: None,
@@ -111,45 +105,47 @@ impl BpfManager {
     }
 
     pub fn attach_all(&mut self, ifindex: u32) -> Result<()> {
-        let _ = self.attach_xdp(ifindex);
-        let _ = self.attach_tc(ifindex, "egress");
-        let _ = self.attach_fw_tc(ifindex);
-        let _ = self.attach_cgroup_vip();
+        self.attach_xdp(ifindex)?;
+        self.attach_tc(ifindex, "egress")?;
+        if let Some(ref mut fw) = self.fw {
+            self.attach_fw_tc(fw, ifindex)?;
+        }
+        if let Some(ref mut vip) = self.vip {
+            self.attach_cgroup_vip(vip)?;
+        }
         Ok(())
     }
 
     fn attach_xdp(&mut self, ifindex: u32) -> Result<()> {
         let prog = self.mesh.program_mut("xdp_pass").context("xdp_pass not found")?;
         let xdp: &mut Xdp = prog.try_into()?;
-        let link = xdp.attach()?;
+        let link = xdp.attach(ifindex, XdpFlags::default())?;
         self.links.push(Box::new(link));
         Ok(())
     }
 
     fn attach_tc(&mut self, ifindex: u32, _direction: &str) -> Result<()> {
-        let _ = aya::programs::tc::TcError;
         let prog = self.mesh.program_mut("egress_p2p_mesh").context("egress_p2p_mesh not found")?;
-        let tc: &mut aya::programs::SchedClassifier = prog.try_into()?;
-        tc.attach(aya::programs::TcAttachType::Egress)?;
+        let tc: &mut SchedClassifier = prog.try_into()?;
+        let link = tc.attach(ifindex, TcAttachType::Egress)?;
+        self.links.push(Box::new(link));
         Ok(())
     }
 
-    fn attach_fw_tc(&mut self, ifindex: u32) -> Result<()> {
-        if let Some(ref mut fw) = self.fw {
-            if let Some(prog) = fw.program_mut("tc_ingress_firewall") {
-                let tc: &mut aya::programs::SchedClassifier = prog.try_into()?;
-                tc.attach(aya::programs::TcAttachType::Ingress)?;
-            }
+    fn attach_fw_tc(&mut self, fw: &mut Ebpf, ifindex: u32) -> Result<()> {
+        if let Some(prog) = fw.program_mut("tc_ingress_firewall") {
+            let tc: &mut SchedClassifier = prog.try_into()?;
+            let link = tc.attach(ifindex, TcAttachType::Ingress)?;
+            self.links.push(Box::new(link));
         }
         Ok(())
     }
 
-    fn attach_cgroup_vip(&mut self) -> Result<()> {
-        if let Some(ref mut vip) = self.vip {
-            if let Some(prog) = vip.program_mut("vip_load_balance") {
-                let cg: &mut aya::programs::CgroupSkb = prog.try_into()?;
-                cg.attach(CgroupAttachMode::Single)?;
-            }
+    fn attach_cgroup_vip(&mut self, vip: &mut Ebpf) -> Result<()> {
+        if let Some(prog) = vip.program_mut("vip_load_balance") {
+            let cg: &mut aya::programs::CgroupSkb = prog.try_into()?;
+            let link = cg.attach(CgroupAttachMode::Single)?;
+            self.links.push(Box::new(link));
         }
         Ok(())
     }
@@ -167,9 +163,6 @@ pub async fn find_default_ifindex() -> Result<u32> {
         for (i, part) in parts.iter().enumerate() {
             if *part == "dev" && i + 1 < parts.len() {
                 let name = parts[i + 1];
-                if let Ok(iface) = tokio::net::TcpStream::connect("127.0.0.1:1").await {
-                    drop(iface);
-                }
                 let out = tokio::process::Command::new("ip")
                     .args(["link", "show", name])
                     .output()

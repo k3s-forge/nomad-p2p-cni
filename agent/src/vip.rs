@@ -1,23 +1,20 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::net::Ipv4Addr;
-
-use tokio::sync::watch;
 
 use crate::AgentState;
 
 pub async fn probe_loop(
     state: Arc<AgentState>,
-    mut stop: watch::Receiver<bool>,
+    stop: Arc<AtomicBool>,
 ) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
     loop {
-        tokio::select! {
-            _ = stop.changed() => return,
-            _ = interval.tick() => {
-                let _ = &state;
-                // TODO: probe VIP backends and update BPF map
-            }
-        }
+        if stop.load(Ordering::SeqCst) { return; }
+        interval.tick().await;
+        if stop.load(Ordering::SeqCst) { return; }
+        let _ = &state;
+        // TODO: probe VIP backends and update BPF map
     }
 }
 

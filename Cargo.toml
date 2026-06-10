@@ -5,6 +5,7 @@ members = [
     "ebpf",
     "agent",
     "cni",
+    "xtask",
 ]
 
 [workspace.package]

@@ -16,10 +16,13 @@ import (
 )
 
 const (
-	hmacSize       = 32
-	headerSize     = 16
-	minMessageSize = headerSize + hmacSize
-	replayWindow   = 5 * time.Minute
+	hmacSize            = 32
+	headerSize          = 16
+	minMessageSize      = headerSize + hmacSize
+	replayWindow        = 5 * time.Minute
+	routeMissBufSize    = 4096
+	routeMissBatchInterval = 100 * time.Millisecond
+	routeMissCooldown   = 5 * time.Second
 )
 
 type Message struct {
@@ -202,11 +205,16 @@ func (a *Agent) consumeRouteMiss() {
 		return
 	}
 	defer rd.Close()
+
+	missCh := make(chan string, routeMissBufSize)
+	go a.drainRouteMissBatch(missCh)
+
 	for {
 		record, err := rd.Read()
 		if err != nil {
 			select {
 			case <-a.stopCh:
+				close(missCh)
 				return
 			default:
 				continue
@@ -217,33 +225,74 @@ func (a *Agent) consumeRouteMiss() {
 		}
 		missedIP := make(net.IP, 4)
 		binary.BigEndian.PutUint32(missedIP, binary.BigEndian.Uint32(record.RawSample[:4]))
-
 		ipStr := missedIP.String()
-		now := time.Now()
 
-		a.routeMissMu.Lock()
-		lastSeen, exists := a.routeMissPending[ipStr]
-		if exists && now.Sub(lastSeen) < 5*time.Second {
-			a.routeMissMu.Unlock()
-			continue
+		select {
+		case missCh <- ipStr:
+		default:
+			a.metrics.inc("route_miss_drops")
 		}
-		if len(a.routeMissPending) > a.cfg.RouteMissMaxPending {
-			for k := range a.routeMissPending {
-				delete(a.routeMissPending, k)
-				break
+	}
+}
+
+func (a *Agent) drainRouteMissBatch(missCh <-chan string) {
+	batch := make(map[string]struct{})
+	ticker := time.NewTicker(routeMissBatchInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-a.stopCh:
+			return
+		case ipStr, ok := <-missCh:
+			if !ok {
+				return
+			}
+			batch[ipStr] = struct{}{}
+			if len(batch) >= a.cfg.RouteMissMaxPending {
+				a.flushRouteMissBatch(batch)
+				batch = make(map[string]struct{})
+			}
+		case <-ticker.C:
+			if len(batch) > 0 {
+				a.flushRouteMissBatch(batch)
+				batch = make(map[string]struct{})
 			}
 		}
-		a.routeMissPending[ipStr] = now
-		a.routeMissMu.Unlock()
+	}
+}
 
-		log.Printf("[agent] route miss for %s", missedIP)
+func (a *Agent) flushRouteMissBatch(batch map[string]struct{}) {
+	now := time.Now()
+
+	a.routeMissMu.Lock()
+	for ipStr := range batch {
+		if lastSeen, exists := a.routeMissPending[ipStr]; exists && now.Sub(lastSeen) < routeMissCooldown {
+			delete(batch, ipStr)
+			continue
+		}
+		a.routeMissPending[ipStr] = now
+	}
+	a.routeMissMu.Unlock()
+
+	if len(batch) == 0 {
+		return
+	}
+
+	a.mu.RLock()
+	seedAddrs := make([]string, 0, len(a.seedConns))
+	for addr := range a.seedConns {
+		seedAddrs = append(seedAddrs, addr)
+	}
+	a.mu.RUnlock()
+
+	for ipStr := range batch {
+		log.Printf("[agent] route miss for %s", ipStr)
 		a.metrics.inc("route_misses")
 
-		a.mu.RLock()
-		for addr := range a.seedConns {
+		for _, addr := range seedAddrs {
 			a.queryNodeFromSeed(addr, ipStr)
 		}
-		a.mu.RUnlock()
 
 		if a.natType == NATSymmetric {
 			a.tryRelayForTarget(ipStr)

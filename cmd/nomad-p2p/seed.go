@@ -290,8 +290,8 @@ func (a *Agent) peerHealthLoop() {
 
 			a.routeMissMu.Lock()
 			now := time.Now()
-			for ip, t := range a.routeMissPending {
-				if now.Sub(t) > time.Minute {
+			for ip := range a.routeMissPending {
+				if now.Sub(a.routeMissPending[ip]) > routeMissCooldown*2 {
 					delete(a.routeMissPending, ip)
 				}
 			}

@@ -1,18 +1,12 @@
 use anyhow::{Context, Result};
 use aya::{
-    Ebpf, EbpfLoader,
+    Bpf, BpfLoader,
     maps::{HashMap, MapData, RingBuf},
     programs::{SchedClassifier, TcAttachType, Xdp, XdpFlags},
 };
 use nomad_p2p_common::{PeerEndpoint, TunnelCfg, VipInfo, AclRule};
 use std::path::Path;
 use std::sync::Arc;
-
-// Safety: these are #[repr(C)] POD types safe for BPF map storage
-unsafe impl aya::Pod for PeerEndpoint {}
-unsafe impl aya::Pod for TunnelCfg {}
-unsafe impl aya::Pod for VipInfo {}
-unsafe impl aya::Pod for AclRule {}
 
 pub struct BpfMaps {
     pub container_route: Option<HashMap<MapData, u32, u32>>,
@@ -25,35 +19,35 @@ pub struct BpfMaps {
 }
 
 pub struct BpfManager {
-    pub mesh: Ebpf,
-    pub fw: Option<Ebpf>,
-    pub vip: Option<Ebpf>,
+    pub mesh: Bpf,
+    pub fw: Option<Bpf>,
+    pub vip: Option<Bpf>,
     pub maps: BpfMaps,
     pub pinned: bool,
     pub ringbuf: Arc<std::sync::Mutex<Option<RingBuf<MapData>>>>,
 }
 
-fn into_map<K: aya::Pod, V: aya::Pod>(m: Option<MapData>) -> Option<HashMap<MapData, K, V>> {
-    m.and_then(|d| HashMap::try_from(d).ok())
+fn map_from<K: aya::Pod, V: aya::Pod>(mut d: MapData) -> Option<HashMap<MapData, K, V>> {
+    HashMap::try_from(&mut d).ok()
 }
 
 impl BpfManager {
     pub fn load() -> Result<Self> {
-        let mut mesh = EbpfLoader::new()
+        let mut mesh = BpfLoader::new()
             .load_file(Path::new("bin/mesh.bpf.o"))
             .context("load mesh BPF")?;
 
         let ringbuf = mesh.map_mut("ROUTE_MISS_RINGBUF")
             .and_then(|m| RingBuf::try_from(m).ok());
 
-        let fw = EbpfLoader::new().load_file(Path::new("bin/firewall.bpf.o")).ok();
-        let vip = EbpfLoader::new().load_file(Path::new("bin/vip_balancer.bpf.o")).ok();
+        let fw = BpfLoader::new().load_file(Path::new("bin/firewall.bpf.o")).ok();
+        let vip = BpfLoader::new().load_file(Path::new("bin/vip_balancer.bpf.o")).ok();
 
         let maps = BpfMaps {
-            container_route: into_map::<u32, u32>(mesh.take_map("CONTAINER_ROUTE_MAP").ok()),
-            node_dynamic: into_map::<u32, PeerEndpoint>(mesh.take_map("NODE_DYNAMIC_MAP").ok()),
-            geneve_ifindex: into_map::<u32, u32>(mesh.take_map("GENEVE_IFINDEX_MAP").ok()),
-            tunnel_cfg: into_map::<u32, TunnelCfg>(mesh.take_map("TUNNEL_CFG_MAP").ok()),
+            container_route: mesh.take_map("CONTAINER_ROUTE_MAP").ok().and_then(map_from::<u32, u32>),
+            node_dynamic: mesh.take_map("NODE_DYNAMIC_MAP").ok().and_then(map_from::<u32, PeerEndpoint>),
+            geneve_ifindex: mesh.take_map("GENEVE_IFINDEX_MAP").ok().and_then(map_from::<u32, u32>),
+            tunnel_cfg: mesh.take_map("TUNNEL_CFG_MAP").ok().and_then(map_from::<u32, TunnelCfg>),
             vip_map: None,
             acl_map: None,
             default_policy: None,
@@ -62,45 +56,23 @@ impl BpfManager {
         Ok(Self { mesh, fw, vip, maps, pinned: false, ringbuf: Arc::new(std::sync::Mutex::new(ringbuf)) })
     }
 
-    pub fn set_tunnel_cfg(&self, tunnel_id: u32) -> Result<()> {
-        if let Some(ref map) = self.maps.tunnel_cfg {
-            map.insert(&0u32, &TunnelCfg { tunnel_id }, 0)?;
-        }
+    pub fn set_tunnel_cfg(&mut self, tunnel_id: u32) -> Result<()> {
+        if let Some(ref mut map) = self.maps.tunnel_cfg { map.insert(&0u32, &TunnelCfg { tunnel_id }, 0)?; }
         Ok(())
     }
 
-    pub fn set_geneve_ifindex(&self, ifindex: u32) -> Result<()> {
-        if let Some(ref map) = self.maps.geneve_ifindex {
-            map.insert(&0u32, &ifindex, 0)?;
-        }
+    pub fn update_peer(&mut self, overlay_ip: u32, ep: &PeerEndpoint) -> Result<()> {
+        if let Some(ref mut map) = self.maps.node_dynamic { map.insert(&overlay_ip, ep, 0)?; }
         Ok(())
     }
 
-    pub fn update_peer(&self, overlay_ip: u32, ep: &PeerEndpoint) -> Result<()> {
-        if let Some(ref map) = self.maps.node_dynamic {
-            map.insert(&overlay_ip, ep, 0)?;
-        }
+    pub fn update_container_route(&mut self, container_ip: u32, route_vni: u32) -> Result<()> {
+        if let Some(ref mut map) = self.maps.container_route { map.insert(&container_ip, &route_vni, 0)?; }
         Ok(())
     }
 
-    pub fn remove_peer(&self, overlay_ip: u32) -> Result<()> {
-        if let Some(ref map) = self.maps.node_dynamic {
-            map.remove(&overlay_ip)?;
-        }
-        Ok(())
-    }
-
-    pub fn update_container_route(&self, container_ip: u32, route_vni: u32) -> Result<()> {
-        if let Some(ref map) = self.maps.container_route {
-            map.insert(&container_ip, &route_vni, 0)?;
-        }
-        Ok(())
-    }
-
-    pub fn remove_container_route(&self, container_ip: u32) -> Result<()> {
-        if let Some(ref map) = self.maps.container_route {
-            map.remove(&container_ip)?;
-        }
+    pub fn remove_container_route(&mut self, container_ip: u32) -> Result<()> {
+        if let Some(ref mut map) = self.maps.container_route { map.remove(&container_ip)?; }
         Ok(())
     }
 
@@ -121,15 +93,13 @@ impl BpfManager {
 }
 
 pub async fn find_default_ifindex() -> Result<u32> {
-    let out = tokio::process::Command::new("ip")
-        .args(["route","show","default"]).output().await.context("ip route")?;
+    let out = tokio::process::Command::new("ip").args(["route","show","default"]).output().await.context("ip route")?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     for line in stdout.lines() {
         let p: Vec<&str> = line.split_whitespace().collect();
         if let Some(pos) = p.iter().position(|&x| x == "dev") {
             if let Some(name) = p.get(pos + 1) {
-                let out = tokio::process::Command::new("ip")
-                    .args(["link","show",name]).output().await?;
+                let out = tokio::process::Command::new("ip").args(["link","show",name]).output().await?;
                 let s = String::from_utf8_lossy(&out.stdout);
                 if let Some(l) = s.lines().next() {
                     if let Some(idx) = l.split(':').next().and_then(|i| i.trim().parse::<u32>().ok()) {

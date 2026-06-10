@@ -30,7 +30,10 @@ jobs:
 
       - name: Build eBPF (bpfel-unknown-none)
         run: |
-          cargo +nightly run --package xtask -- build-ebpf 2>&1
+          cargo +nightly build --target bpfel-unknown-none -Z build-std=core --package nomad-p2p-ebpf --release 2>&1
+          mkdir -p bin
+          cp target/bpfel-unknown-none/release/nomad-p2p-ebpf bin/mesh.bpf.o
+          ls -la bin/
 
       - name: Build release binaries
         run: |

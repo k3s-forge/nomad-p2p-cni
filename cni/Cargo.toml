@@ -10,6 +10,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 ureq = "2.9"
+tracing = { workspace = true }
 
 [lib]
 name = "nomad_p2p_cni"

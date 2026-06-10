@@ -177,14 +177,14 @@ fn cmd_del(cmd: &CniCmd, cni_version: &str) -> anyhow::Result<()> {
 }
 
 fn allocate_ip(container_id: &str) -> Ipv4Addr {
-    // Query agent API for a free IP in the BPF-persisted map
     let body = serde_json::json!({
         "action": "allocate",
         "container_id": container_id,
     });
+    let payload = serde_json::to_string(&body).unwrap_or_default();
     match ureq::post(&format!("{}/api/v1/container", AGENT_API))
         .set("Content-Type", "application/json")
-        .send_json(&body)
+        .send_string(&payload)
     {
         Ok(resp) => {
             if let Ok(json) = resp.into_json::<serde_json::Value>() {
@@ -211,9 +211,10 @@ fn notify_agent(action: &str, container_id: &str, ip: &str, iface: &str) -> Resu
         "ip": ip,
         "iface": iface,
     });
+    let payload = serde_json::to_string(&body).map_err(|e| format!("json: {}", e))?;
     ureq::post(&format!("{}/api/v1/container", AGENT_API))
         .set("Content-Type", "application/json")
-        .send_json(&body)
+        .send_string(&payload)
         .map_err(|e| format!("agent API error: {}", e))?;
     Ok(())
 }

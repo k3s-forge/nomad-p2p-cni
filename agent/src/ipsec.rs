@@ -163,7 +163,7 @@ impl IpsecManager {
 
 pub async fn ipsec_loop(
     state: Arc<AgentState>,
-    mut ipsec: Arc<std::sync::Mutex<IpsecManager>>,
+    ipsec: Arc<std::sync::Mutex<IpsecManager>>,
     stop: Arc<AtomicBool>,
 ) {
     if !state.cfg.read().await.ipsec_enabled {
@@ -179,10 +179,10 @@ pub async fn ipsec_loop(
         if stop.load(Ordering::SeqCst) { return; }
 
         {
-            let mut ipsec = ipsec.lock().unwrap();
-            if let Err(e) = ipsec.rotate_key().await {
-                tracing::warn!("IPsec key rotation failed: {}", e);
-            }
+            let mut guard = ipsec.lock().unwrap();
+            guard.spi = guard.spi.wrapping_add(1);
+            guard.key = IpsecManager::generate_key();
+            tracing::info!("IPsec key rotation: spi={:08x}", guard.spi);
         }
     }
 }

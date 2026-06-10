@@ -12,7 +12,6 @@ use tokio::net::UdpSocket;
 use nomad_p2p_common::{HEADER_SIZE, HMAC_SIZE, MIN_MESSAGE_SIZE, REPLAY_WINDOW_SECS};
 
 use crate::bpf;
-use crate::route;
 
 type HmacSha256 = Hmac<Sha256>;
 

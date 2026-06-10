@@ -6,7 +6,7 @@ use tokio::net::UdpSocket;
 
 use crate::AgentState;
 use crate::protocol::UdpProtocol;
-use crate::seed::{Message, RelayInfo};
+use crate::seed::Message;
 
 pub async fn try_relay(
     state: &Arc<AgentState>,
@@ -44,7 +44,7 @@ async fn query_seed_for_relay(
         relay: None,
     };
 
-    let mut proto = proto.lock().await;
+    let proto = proto.lock().await;
     if proto.send_to(&msg, &seed_addr).await.is_err() {
         return None;
     }

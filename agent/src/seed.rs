@@ -91,7 +91,7 @@ impl SeedClient {
             relay: None,
         };
 
-        let mut proto = self.proto.lock().await;
+        let proto = self.proto.lock().await;
         proto.send_to(&msg, &addr).await?;
         tracing::info!("registered with seed {}", addr);
 
@@ -113,7 +113,7 @@ impl SeedClient {
             relay: None,
         };
 
-        let mut proto = self.proto.lock().await;
+        let proto = self.proto.lock().await;
         if proto.send_to(&msg, &addr).await.is_err() {
             tracing::warn!("failed to query seed {} for {}", addr, overlay_ip);
             return None;
@@ -135,7 +135,7 @@ fn now_ts() -> i64 {
 pub async fn health_loop(
     state: Arc<AgentState>,
     client: Arc<tokio::sync::Mutex<SeedClient>>,
-    proto: Arc<tokio::sync::Mutex<UdpProtocol>>,
+    _proto: Arc<tokio::sync::Mutex<UdpProtocol>>,
     stop: Arc<AtomicBool>,
 ) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));

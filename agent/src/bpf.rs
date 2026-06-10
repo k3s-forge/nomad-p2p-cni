@@ -1,17 +1,17 @@
 use anyhow::{Context, Result};
-use aya::{Ebpf, EbpfLoader, maps::HashMap, programs::{SchedClassifier, TcAttachType, Xdp, XdpFlags, CgroupAttachMode}};
+use aya::{Ebpf, EbpfLoader, maps::{HashMap, MapData, RingBuf}, programs::{SchedClassifier, TcAttachType, Xdp, XdpFlags}};
 use nomad_p2p_common::{PeerEndpoint, TunnelCfg};
 use std::path::Path;
 use std::sync::Arc;
 
 pub struct BpfMaps {
-    pub container_route: Option<HashMap<u32, u32>>,
-    pub node_dynamic: Option<HashMap<u32, PeerEndpoint>>,
-    pub geneve_ifindex: Option<HashMap<u32, u32>>,
-    pub tunnel_cfg: Option<HashMap<u32, TunnelCfg>>,
-    pub vip_map: Option<HashMap<u32, nomad_p2p_common::VipInfo>>,
-    pub acl_map: Option<HashMap<u32, nomad_p2p_common::AclRule>>,
-    pub default_policy: Option<HashMap<u32, u8>>,
+    pub container_route: Option<HashMap<MapData, u32, u32>>,
+    pub node_dynamic: Option<HashMap<MapData, u32, PeerEndpoint>>,
+    pub geneve_ifindex: Option<HashMap<MapData, u32, u32>>,
+    pub tunnel_cfg: Option<HashMap<MapData, u32, TunnelCfg>>,
+    pub vip_map: Option<HashMap<MapData, u32, nomad_p2p_common::VipInfo>>,
+    pub acl_map: Option<HashMap<MapData, u32, nomad_p2p_common::AclRule>>,
+    pub default_policy: Option<HashMap<MapData, u32, u8>>,
 }
 
 pub struct BpfManager {
@@ -19,8 +19,13 @@ pub struct BpfManager {
     pub fw: Option<Ebpf>,
     pub vip: Option<Ebpf>,
     pub maps: BpfMaps,
+    pub links: Vec<Box<dyn aya::programs::Link>>,
     pub pinned: bool,
-    pub ringbuf: Arc<std::sync::Mutex<Option<aya::maps::RingBuf>>>,
+    pub ringbuf: Arc<std::sync::Mutex<Option<RingBuf<MapData>>>>,
+}
+
+fn map_or_none<K: aya::Pod, V: aya::Pod>(m: Option<MapData>) -> Option<HashMap<MapData, K, V>> {
+    m.and_then(|d| HashMap::try_from(d).ok())
 }
 
 impl BpfManager {
@@ -29,19 +34,17 @@ impl BpfManager {
             .load_file(Path::new("bin/mesh.bpf.o"))
             .context("load mesh BPF")?;
 
-        let ringbuf = match mesh.map_mut("ROUTE_MISS_RINGBUF") {
-            Some(m) => aya::maps::RingBuf::try_from(m).ok(),
-            None => None,
-        };
+        let ringbuf = mesh.map_mut("ROUTE_MISS_RINGBUF")
+            .and_then(|m| RingBuf::try_from(&*m).ok());
 
         let fw = EbpfLoader::new().load_file(Path::new("bin/firewall.bpf.o")).ok();
         let vip = EbpfLoader::new().load_file(Path::new("bin/vip_balancer.bpf.o")).ok();
 
         let maps = BpfMaps {
-            container_route: mesh.take_map("CONTAINER_ROUTE_MAP").ok().and_then(|m| HashMap::try_from(m).ok()),
-            node_dynamic: mesh.take_map("NODE_DYNAMIC_MAP").ok().and_then(|m| HashMap::try_from(m).ok()),
-            geneve_ifindex: mesh.take_map("GENEVE_IFINDEX_MAP").ok().and_then(|m| HashMap::try_from(m).ok()),
-            tunnel_cfg: mesh.take_map("TUNNEL_CFG_MAP").ok().and_then(|m| HashMap::try_from(m).ok()),
+            container_route: map_or_none::<u32, u32>(mesh.take_map("CONTAINER_ROUTE_MAP").ok()),
+            node_dynamic: map_or_none::<u32, PeerEndpoint>(mesh.take_map("NODE_DYNAMIC_MAP").ok()),
+            geneve_ifindex: map_or_none::<u32, u32>(mesh.take_map("GENEVE_IFINDEX_MAP").ok()),
+            tunnel_cfg: map_or_none::<u32, TunnelCfg>(mesh.take_map("TUNNEL_CFG_MAP").ok()),
             vip_map: None,
             acl_map: None,
             default_policy: None,
@@ -80,13 +83,8 @@ impl BpfManager {
         Ok(())
     }
 
-    pub fn list_container_ips(&self) -> Vec<u32> {
-        Vec::new()
-    }
-
-    pub fn is_ip_allocated(&self, _ip: u32) -> bool {
-        false
-    }
+    pub fn list_container_ips(&self) -> Vec<u32> { Vec::new() }
+    pub fn is_ip_allocated(&self, _ip: u32) -> bool { false }
 
     pub fn attach_all(&mut self, ifindex: u32) -> Result<()> {
         self.attach_xdp(ifindex)?;
